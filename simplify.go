@@ -8,19 +8,25 @@ import (
 // simplifyMuseType converts between the possibly complex type returned by Muse to a much
 // simpler type suitable for a dumb device.
 //
-// FIXME: I suppose I should also change the path I write to, as the last bit of the path
-//        is currently the type.  Details...
+// FIXME: I should probably pass msg to the simplifiers so they can change the Type as
+//        well.  Too hacky to assume it here.
 func simplifyMuseType(msg *MuseResponseWithId) {
 	if f, ok := simplfiers[msg.Headers.Type]; ok {
 		if body, err := f(msg.MuseResponse.BodyJSON); err == nil {
 			msg.Headers.Type = msg.Headers.Type + "Simple"
 			msg.BodyJSON = body
+
+			// Yup, this has got to go
+			if msg.Headers.Type == "groupsSimple" {
+				msg.Headers.Type = "playersSimple"
+			}
 		}
 	}
 }
 
 var simplfiers = map[string]func([]byte) ([]byte, error){
 	"extendedPlaybackStatus": simplifyPlaybackExtended,
+	"groups":                 simplifyGroups,
 }
 
 //
@@ -86,6 +92,34 @@ func simplifyPlaybackExtended(body []byte) ([]byte, error) {
 	return marshalWithNoHtmlEscape(simpleMsg)
 }
 
+//
+// groups, which turn into players when simplified
+//
+type SimplePlayer struct {
+	Id   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func simplifyGroups(body []byte) ([]byte, error) {
+
+	// Validate
+	sonosMsg := MuseGroupsResponse{}
+	if err := json.Unmarshal(body, &sonosMsg); err != nil {
+		return nil, err
+	}
+
+	// Convert
+	players := make([]SimplePlayer, 0, 32)
+	for _, p := range sonosMsg.Players {
+		players = append(players, SimplePlayer{Id: p.Id, Name: p.Name})
+	}
+
+	return marshalWithNoHtmlEscape(players)
+}
+
+//
+// Helper for marshalling without HTML escaping
+//
 func marshalWithNoHtmlEscape(v interface{}) ([]byte, error) {
 	buffer := bytes.NewBuffer([]byte{})
 

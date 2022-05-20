@@ -289,16 +289,14 @@ func (app *App) handleResponse(msg MuseResponseWithId) {
 		if msg.Headers.GroupId == "" {
 			hhPath := fmt.Sprintf("%s/%s", path, msg.Headers.Type)
 			app.PublishViaMQTT(hhPath, msg.BodyJSON)
+		} else if app.config.Sonos.FanOut {
+			for _, player := range group.Players {
+				playerPath := fmt.Sprintf("%s/%s/%s", path, player.PlayerId, msg.Headers.Type)
+				app.PublishViaMQTT(playerPath, msg.BodyJSON)
+			}
 		} else {
 			groupPath := fmt.Sprintf("%s/%s/%s", path, group.Coordinator.GroupId, msg.Headers.Type)
 			app.PublishViaMQTT(groupPath, msg.BodyJSON)
-
-			if app.config.Sonos.FanOut {
-				for _, player := range group.Players {
-					playerPath := fmt.Sprintf("%s/%s/%s", path, player.PlayerId, msg.Headers.Type)
-					app.PublishViaMQTT(playerPath, msg.BodyJSON)
-				}
-			}
 		}
 	}
 
