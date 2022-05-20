@@ -1,5 +1,4 @@
-Yup, lots of work to do if I care.  Here is a stream of consciousness list
-while still on my first coffee:
+Yup, lots of work to do if I care.
 
 - General code cleanup
 
@@ -7,50 +6,6 @@ while still on my first coffee:
 
   - Simplify only has two functions and already contains a hack around naming.
 
+- Subscribe to all players and allow player targeted subscriptions
 
-- Find an identity and stick with it.
-
-  The fanout and simplify options, which should probably both be on or both
-  off, make documenting that is evented a pain.  For example, simplify without
-  fanout will event a list of players instead of groups yet it will still event
-  extendedPlaybackStatus to groups.
-
-  I'm strongly leaning towards no config here, but I may consider just
-  simplify and having it imply fanout when set.  The clients would either get
-  the full Sonos view of the world or the simple view.
-
-- Rework the topics used.
-
-  I'm already sick of seeing the full HHID in every topic.  Something  simpler
-  may work, especially since playerIds are unique and groupIds are based on
-  playerIds.
-
-  Maybe something like:
-
-  - {base}/{HouseholdId}/groups
-  - {base}/{HouseholdId}/players
-
-    Groups and/or players in the household
-
-  - {base}/{PlayerId}/...
-
-    Player specific events.  All players in all households are here.
-
-  - {base}/{GroupId}/...
-
-    Group specific events.  All groups in all households are here, assuming we
-    keep groups at all.
-
-  If we dump the dream of even supporting multiple households on the same LAN
-  (or at least the dream of a single app connecting to multiple households), it
-  could be even simpler:
-
-  - {base}/groups
-  - {base}/players
-  - {base}/{PlayerId}/...
-  - {base}/{GroupId}/...
-
-  The end user could fire up an instance per household and set base to
-  something unique like sonos/hh1 and sonos/hh2.  Nothing listening in MQTT
-  land cares a single bit about HouseholdId.
-
+- Only subscribe to GCs and track groups if there is a group targeted subscription

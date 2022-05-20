@@ -66,5 +66,15 @@ func loadConfigFile(cfgPath string) (AppConfig, error) {
 		}
 	}
 
+	// Automatically flip fanout if simplify is selected (for now)
+	//
+	// I'll pull fanout out of the code once I'm sure this is how I want it to work.
+	if config.Sonos.Simplify {
+		if !config.Sonos.FanOut {
+			log.Infof("app: Setting fanout since simplify is set.")
+			config.Sonos.FanOut = true
+		}
+	}
+
 	return config, err
 }

@@ -278,7 +278,7 @@ func (app *App) handleResponse(msg MuseResponseWithId) {
 	log.Debugf("app: handleResponse: id=%s: namespace=%s, type=%s, hhid=%s, groupid=%s", msg.playerId, msg.Headers.Namespace, msg.Headers.Type, msg.Headers.HouseholdId, msg.Headers.GroupId)
 
 	if app.mqttClient != nil {
-		path := fmt.Sprintf("%s/%s", app.config.MQTT.Topic, player.HouseholdId)
+		path := fmt.Sprintf("%s", app.config.MQTT.Topic)
 
 		// Simplify?
 		if app.config.Sonos.Simplify {
@@ -332,7 +332,7 @@ func (app *App) OnMessage(id string, data []byte) {
 }
 
 func (app *App) OnClose(id string) {
-	log.Infof("app: OnClose: %s", id)
+	log.Infof("app: connection lost: %s", id)
 }
 
 //
@@ -351,7 +351,7 @@ func (app *App) PublishViaMQTT(topic string, body []byte) {
 	app.mqttCache[topic] = body
 
 	// Publish
-	log.Infof("app: cache miss: %s", topic)
+	log.Debugf("app: cache miss: %s", topic)
 	app.mqttClient.Publish(topic, 1, true, body)
 }
 
