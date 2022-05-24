@@ -65,9 +65,12 @@ on the command line via --cfgpath.
     # Omitting any of this "works", but defeats the purpose of the application.
     #
     # broker:
-    #   host:   required, hostname or IP of MQTT server
-    #   port:   required, port of MQTT server
-    #   client: required, name to use for this client on the MQTT server
+    #   host:     required, hostname or IP of MQTT server
+    #   port:     required, port of MQTT server
+    #   client:   required, name to use for this client on the MQTT server
+    #   tls:      optional, and setting to true enables tls
+    #   username: optional, and only valid if tls is true
+    #   password: optional, and only valid if tls is true
     # topic:    required, base topic to put Sonos MQTT content on
     mqtt:
     broker:

@@ -14,32 +14,6 @@ import (
 	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
-// Config defines the server options we support in the config file.  Who knew?
-type Config struct {
-	// Log level
-	Debug bool `yaml:"debug"`
-
-	// Sonos options
-	Sonos struct {
-		ApiKey      string `yaml:"apikey"`
-		HouseholdId string `yaml:"household"` // Filter to households with this if provided
-
-		// Things to subscribe to, and how to handle the data
-		Subscriptions []string `yaml:"subscriptions"`
-		Simplify      bool     `yaml:"simplify"`
-
-		// Geekier stuff.  May go away.
-		ScanTime uint `yaml:"scantime"` // Time to wait for mDNS responses.  Defaults to 5 seconds.
-		FanOut   bool `yaml:"fanout"`   // True to copy coordinator events to players
-	} `yaml:"sonos"`
-
-	// MQTT broker-isms
-	MQTT struct {
-		Config MQTTConfig `yaml:"broker"`
-		Topic  string     `yaml:"topic"`
-	} `yaml:"mqtt"`
-}
-
 type appState int
 
 const (
