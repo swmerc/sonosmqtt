@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+
+	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
 // simplifyMuseType converts between the possibly complex type returned by Muse to a much
@@ -12,7 +14,7 @@ import (
 //        well.  Too hacky to assume it here.
 func simplifyMuseType(msg *MuseResponseWithId) {
 	if f, ok := simplfiers[msg.Headers.Type]; ok {
-		if body, err := f(msg.MuseResponse.BodyJSON); err == nil {
+		if body, err := f(msg.Response.BodyJSON); err == nil {
 			msg.Headers.Type = msg.Headers.Type + "Simple"
 			msg.BodyJSON = body
 
@@ -29,33 +31,6 @@ var simplfiers = map[string]func([]byte) ([]byte, error){
 	"groups":                 simplifyGroups,
 }
 
-//
-// Translate MuseExtendedPlaybackStatus to our simpler format. Note that this is FAR from
-// the complete message, but it doesn't matter.  We just need to define the stuff we intend
-// to read from it.
-//
-type MuseExtendedPlaybackStatus struct {
-	PlaybackState MusePlaybackState `json:"playback"`
-	Metadata      struct {
-		CurrentItem struct {
-			Track struct {
-				Type     string `json:"type"`
-				Name     string `json:"name"`
-				ImageUrl string `json:"imageUrl"`
-				Album    struct {
-					Name string `json:"name"`
-				} `json:"album"`
-				Artist struct {
-					Name string `json:"name"`
-				} `json:"artist"`
-				Service struct {
-					Name string `json:"name"`
-				} `json:"service"`
-			} `json:"track"`
-		} `json:"currentItem"`
-	} `json:"Metadata"`
-}
-
 type SimpleExtendedPlaybackStatus struct {
 	PlaybackState string `json:"playbackState"`
 	Artist        string `json:"artist,omitempty"`
@@ -67,7 +42,7 @@ type SimpleExtendedPlaybackStatus struct {
 
 func simplifyPlaybackExtended(body []byte) ([]byte, error) {
 
-	sonosMsg := MuseExtendedPlaybackStatus{}
+	sonosMsg := sonos.ExtendedPlaybackStatus{}
 	if err := json.Unmarshal(body, &sonosMsg); err != nil {
 		return nil, err
 	}
@@ -103,7 +78,7 @@ type SimplePlayer struct {
 func simplifyGroups(body []byte) ([]byte, error) {
 
 	// Validate
-	sonosMsg := MuseGroupsResponse{}
+	sonosMsg := sonos.GroupsResponse{}
 	if err := json.Unmarshal(body, &sonosMsg); err != nil {
 		return nil, err
 	}

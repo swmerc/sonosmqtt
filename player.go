@@ -3,16 +3,15 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
 type Player struct {
 	// Stuff from /info or /groups.  Not quite static, but we'll regenerate if GroupId changes so this is
 	// all static enough for our purposes.
-	//
-	// Note that we don't emit all of it when converting to json.  We really only need Name and Id since
-	// the apps I'm using just want to look up PlayerId for a given name.
-	Name          string `json:"name"`
-	PlayerId      string `json:"playerId"`
+	Name          string
+	PlayerId      string
 	GroupId       string
 	CoordinatorId string
 	HouseholdId   string
@@ -51,7 +50,10 @@ func restUrlFromWebsocketUrl(websocketUrl string) string {
 // Functions to generate all of the data we need to talk to a player from a couple of sources.  I suppose
 // I could just use one of the existing structs from Muse and add in what I need.
 //
-func newInternalPlayerFromPlayerInfoReponse(info MusePlayerInfoResponse) *Player {
+
+// newInternalPlayerFromInfoResponse takes the data returned from /info and turns it into
+// our internal format.  Stuff not included is generated.
+func newInternalPlayerFromInfoResponse(info sonos.PlayerInfoResponse) *Player {
 	return &Player{
 		Name:          info.Device.Name,
 		PlayerId:      info.PlayerId,
@@ -65,7 +67,10 @@ func newInternalPlayerFromPlayerInfoReponse(info MusePlayerInfoResponse) *Player
 	}
 }
 
-func newInternalPlayerFromMusePlayer(player MusePlayer, householdId string, groupId string) *Player {
+// newInternalPlayerFromSonos takes the player data returned in things like GroupsResponse and
+// turns it into our internal format.  No, this is not the same data we get from /info, or at
+// least it was not at some point.  The RestUrl may be included now.
+func newInternalPlayerFromSonosPlayer(player sonos.Player, householdId string, groupId string) *Player {
 	return &Player{
 		Name:          player.Name,
 		PlayerId:      player.Id,

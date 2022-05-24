@@ -11,10 +11,11 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	log "github.com/sirupsen/logrus"
+	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
-// AppConfig defines the server options we support in the config file.  Who knew?
-type AppConfig struct {
+// Config defines the server options we support in the config file.  Who knew?
+type Config struct {
 	// Log level
 	Debug bool `yaml:"debug"`
 
@@ -52,7 +53,7 @@ const (
 
 type MuseResponseWithId struct {
 	playerId string
-	MuseResponse
+	sonos.Response
 }
 
 type ErrorWithId struct {
@@ -62,7 +63,7 @@ type ErrorWithId struct {
 
 // App contains all global state.  Ew.  Needs an interface?
 type App struct {
-	config     AppConfig
+	config     Config
 	mqttClient mqtt.Client
 
 	// Current state
@@ -93,7 +94,7 @@ type App struct {
 	mqttCache map[string][]byte
 }
 
-func NewApp(config AppConfig, client mqtt.Client) *App {
+func NewApp(config Config, client mqtt.Client) *App {
 	return &App{
 		config:          config,
 		mqttClient:      client,
@@ -129,10 +130,10 @@ func (app *App) run() {
 			var err error = fmt.Errorf("timeout")
 
 			if player := app.discoverPlayer(); player != nil {
-				var response MuseGroupsResponse
+				var response sonos.GroupsResponse
 
 				log.Infof("found: %s", player.String())
-				if response, err = app.getGroupsRest(*player); err == nil {
+				if response, err = app.getGroupsRest(player); err == nil {
 					if app.groupUpdate, err = getGroupMap(player.HouseholdId, response); err == nil {
 						app.currentState = CreateWebsockets
 					}
@@ -247,7 +248,7 @@ func (app *App) handleResponse(msg MuseResponseWithId) {
 	//
 	if msg.Headers.Type == "groups" {
 		// Make sure we can parse it
-		groupsResponse := MuseGroupsResponse{}
+		groupsResponse := sonos.GroupsResponse{}
 		if err := json.Unmarshal(msg.BodyJSON, &groupsResponse); err != nil {
 			return
 		}
@@ -318,16 +319,16 @@ func (app *App) OnError(id string, err error) {
 
 func (app *App) OnMessage(id string, data []byte) {
 	// Parse the response
-	var museResponse MuseResponse
-	if err := museResponse.fromRawBytes(data); err != nil {
+	var museResponse sonos.Response
+	if err := museResponse.FromRawBytes(data); err != nil {
 		log.Errorf("app: unable to parse: %s (%s)", err.Error(), string(data))
 	}
 
 	//log.Debugf("RX: Player: %s, Headers: %v, Body: %s", id, museResponse.Headers, museResponse.BodyJSON)
 
 	app.responseChannel <- MuseResponseWithId{
-		playerId:     id,
-		MuseResponse: museResponse,
+		playerId: id,
+		Response: museResponse,
 	}
 }
 
@@ -362,7 +363,7 @@ func (app *App) SendMessageToPlayer(player *Player, namespace string, command st
 	cmdId := player.CmdId
 	player.CmdId = player.CmdId + 1
 
-	headers := &MuseHeaders{
+	headers := &sonos.Headers{
 		Namespace:   namespace,
 		Command:     command,
 		HouseholdId: player.HouseholdId,
@@ -391,16 +392,16 @@ func (app *App) discoverPlayer() *Player {
 	// The loop is a bit funky since we currently can reject players if something goes wrong.  All errors
 	// are continues so we try the next player in the array
 	//
-	for _, p := range scanForPlayers(app.config.Sonos.ScanTime) {
+	for _, mdnsDevice := range ScanForPlayersViaMDNS(app.config.Sonos.ScanTime) {
 
 		// New player. Hit /info to get the player and /groups to get the rest of them
-		body, err := app.museGetRestFromMDNSDevice(p, p.InfoUrl)
+		body, err := app.museGetRest(mdnsDevice.InfoUrl)
 		if err != nil {
-			log.Errorf("Unable to fetch info for %s (%s)", p.IP, err.Error())
+			log.Errorf("Unable to fetch info from %s: %s)", mdnsDevice.InfoUrl, err.Error())
 			continue
 		}
 
-		var info MusePlayerInfoResponse
+		var info sonos.PlayerInfoResponse
 		log.Debugf("PlayerInfo: %s", string(body))
 		if json.Unmarshal(body, &info) != nil {
 			log.Errorf("Unable to parse response from /info")
@@ -410,7 +411,7 @@ func (app *App) discoverPlayer() *Player {
 		// we latch the first HHID we see and skip players from other HHs.  I suspect the
 		// final variant will report data for all HHs, but I'm sticking with tracking
 		// a single player in a single HH for now.
-		thisPlayer := newInternalPlayerFromPlayerInfoReponse(info)
+		thisPlayer := newInternalPlayerFromInfoResponse(info)
 		if len(app.config.Sonos.HouseholdId) != 0 && stripMuseHouseholdId(thisPlayer.HouseholdId) != app.config.Sonos.HouseholdId {
 			log.Debugf("HHID filtered: %s", thisPlayer.HouseholdId)
 			continue
@@ -424,106 +425,21 @@ func (app *App) discoverPlayer() *Player {
 	return nil
 }
 
-// Group contains the information required to turn group events into individual player events.
-//
-// The Coordinator is the player that is actually downloading/playing the content.  It sends
-// this data to the other players.  Note that I left the cooridinator in the map of players
-// to make it easier to iterate over at the expense of a little data.
-//
-// Note that we have a TON of copies of the PlayerId for now (and perhaps always).  Oh well.
-type Group struct {
-	Coordinator *Player
-	Players     map[string]*Player
-}
-
-func groupsAreCloseEnoughForMe(a, b map[string]Group) bool {
-
-	// Quick and dirty length check.
-	if len(a) != len(b) {
-		return false
-	}
-
-	// Number of groups matches, make sure each one matches
-	for id, group := range a {
-
-		// Miss
-		groupMatch, ok := b[id]
-		if ok != true {
-			return false
-		}
-
-		// Hit with different number of players
-		if len(group.Players) != len(groupMatch.Players) {
-			return false
-		}
-
-		// Walk the players.  Almost done.
-		for id := range group.Players {
-			if _, ok := groupMatch.Players[id]; ok != true {
-				return false
-			}
-		}
-
-	}
-
-	return true
-}
-
-// getGroupMap parses a MuseGroupsResponse and returns a map of all Groups indexed by PlayerId.
-func getGroupMap(hhid string, groupsResponse MuseGroupsResponse) (map[string]Group, error) {
-	var allPlayers map[string]*Player = make(map[string]*Player, 32)
-	var allGroups map[string]Group = make(map[string]Group, 32)
-
-	// Stash all of the players
-	for _, p := range groupsResponse.Players {
-		player := newInternalPlayerFromMusePlayer(p, hhid, "") // We don't know GroupId yet
-		allPlayers[player.PlayerId] = player
-	}
-
-	// Process the groups and create them from the players
-	for _, group := range groupsResponse.Groups {
-		if coordinator, ok := allPlayers[group.CoordinatorId]; ok {
-
-			// We now know groupId.  This is good because we need it for the Muse headers later.
-			//
-			// I could likely pull this out of Player and toss it into Group when we subscribe to all groups?
-			coordinator.GroupId = group.Id
-
-			players := make(map[string]*Player, 32)
-			for _, playerId := range group.PlayerIds {
-				if player, ok := allPlayers[playerId]; ok {
-					player.GroupId = group.Id
-					player.CoordinatorId = coordinator.PlayerId
-					players[player.PlayerId] = player
-				}
-			}
-
-			newGroup := Group{
-				Coordinator: coordinator,
-				Players:     players,
-			}
-			allGroups[coordinator.PlayerId] = newGroup
-		}
-	}
-
-	return allGroups, nil
-}
-
 //
 // We get groups via REST at startup.  I could open a websocket on a random
 // player, get the groups via that, close it, and open a websocket on the
 // final player but it seems silly.  We need REST for GetInfo anyway.
 //
-func (app *App) getGroupsRest(p Player) (MuseGroupsResponse, error) {
-	raw, err := app.museGetRestFromPlayer(p, "households/local/groups")
+func (app *App) getGroupsRest(p *Player) (sonos.GroupsResponse, error) {
+	raw, err := app.museGetRestFromPlayer(p, "/v1/households/local/groups")
 
 	if err != nil {
-		return MuseGroupsResponse{}, err
+		return sonos.GroupsResponse{}, err
 	}
 
-	var groups MuseGroupsResponse
+	var groups sonos.GroupsResponse
 	if json.Unmarshal(raw, &groups) != nil {
-		return MuseGroupsResponse{}, err
+		return sonos.GroupsResponse{}, err
 	}
 
 	return groups, nil
@@ -571,10 +487,6 @@ func (a *App) museGetRest(fullUrl string) ([]byte, error) {
 	return data, nil
 }
 
-func (a *App) museGetRestFromMDNSDevice(d MDNSDevice, path string) ([]byte, error) {
-	return a.museGetRest(fmt.Sprintf("%s%s", d.BaseUrl, path))
-}
-
-func (a *App) museGetRestFromPlayer(p Player, path string) ([]byte, error) {
-	return a.museGetRest(fmt.Sprintf("%s/v1/%s", p.RestUrl, path))
+func (a *App) museGetRestFromPlayer(p *Player, path string) ([]byte, error) {
+	return a.museGetRest(fmt.Sprintf("%s%s", p.RestUrl, path))
 }

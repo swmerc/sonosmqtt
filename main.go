@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	var config AppConfig
+	var config Config
 	var client mqtt.Client
 	var err error
 
@@ -42,11 +42,11 @@ func main() {
 	app.run()
 }
 
-func loadConfigFile(cfgPath string) (AppConfig, error) {
+func loadConfigFile(cfgPath string) (Config, error) {
 	var err error
 
 	// Apply defaults
-	config := AppConfig{}
+	config := Config{}
 	config.Sonos.ScanTime = 5
 
 	// Pull in content from the file

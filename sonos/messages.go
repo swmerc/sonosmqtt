@@ -1,14 +1,12 @@
-package main
+package sonos
 
 import (
 	"encoding/json"
 	"fmt"
 )
 
-// FIXME: I eventually want to kick this into another package.  The naming issues are a pain (MusePlayer vs Player, for example).
-
 // Returned from /api/v1/player/local/info
-type MusePlayerInfoResponse struct {
+type PlayerInfoResponse struct {
 	Device struct {
 		Name string `json:"name"`
 	} `json:"device"`
@@ -19,8 +17,13 @@ type MusePlayerInfoResponse struct {
 	RestUrl      string `json:"restUrl"`
 }
 
-// Returned from /api/v1/households/local/groups
-type MuseGroup struct {
+// Returned from /api/v1/households/local/groups, and evented when subscribing to groups
+type GroupsResponse struct {
+	Groups  []Group  `json:"groups"`
+	Players []Player `json:"players"`
+}
+
+type Group struct {
 	Id              string   `json:"id"`
 	Name            string   `json:"name"`
 	CoordinatorId   string   `json:"coordinatorId"`
@@ -28,24 +31,50 @@ type MuseGroup struct {
 	PlayerIds       []string `json:"playerIds"`
 }
 
-type MusePlayer struct {
+type Player struct {
 	Id           string   `json:"id"`
 	Name         string   `json:"name"`
 	WebsocketUrl string   `json:"websocketUrl"`
 	Capabilities []string `json:"capabilities"`
 }
 
-type MuseGroupsResponse struct {
-	Groups  []MuseGroup  `json:"groups"`
-	Players []MusePlayer `json:"players"`
-}
-
-type MusePlaybackState struct {
+type PlaybackState struct {
 	PlaybackState string `json:"playbackState"`
 }
 
+// ExtendedPlaybackStatus, which is evented when subscribing to playbackExtended.  This is
+// *not* the complete content, only the stuff that I care about for the moment.
+type ExtendedPlaybackStatus struct {
+	PlaybackState PlaybackState `json:"playback"`
+	Metadata      struct {
+		CurrentItem struct {
+			Track struct {
+				Type     string `json:"type"`
+				Name     string `json:"name"`
+				ImageUrl string `json:"imageUrl"`
+				Album    struct {
+					Name string `json:"name"`
+				} `json:"album"`
+				Artist struct {
+					Name string `json:"name"`
+				} `json:"artist"`
+				Service struct {
+					Name string `json:"name"`
+				} `json:"service"`
+			} `json:"track"`
+		} `json:"currentItem"`
+	} `json:"Metadata"`
+}
+
+// Overall response format, which is parsed headers and an unparsed body.  This allows cleaner
+// parsing in the code that deals with the body since we can do it later when we know the type.
+type Response struct {
+	Headers  Headers
+	BodyJSON []byte
+}
+
 // All possible headers.  Probably should split into request and response, but whatever.
-type MuseHeaders struct {
+type Headers struct {
 	// Could be in either request or response
 	Namespace   string `json:"namespace"`
 	Command     string `json:"command"`
@@ -60,14 +89,7 @@ type MuseHeaders struct {
 	Type     string `json:"type,omitempty"`
 }
 
-// The response is parsed headers and unparsed body.  This allows cleaner parsing in the
-// code that deals with the body.
-type MuseResponse struct {
-	Headers  MuseHeaders
-	BodyJSON []byte
-}
-
-func (museResponse *MuseResponse) fromRawBytes(data []byte) error {
+func (response *Response) FromRawBytes(data []byte) error {
 	// Muse responses are a two entry array.  The first entry is MuseHeaders, and the
 	// second is the body, which is the actual data we want.  I kid you not.
 	//
@@ -89,7 +111,7 @@ func (museResponse *MuseResponse) fromRawBytes(data []byte) error {
 	}
 
 	// Parse the JSON a second time to put it in the header
-	if err = json.Unmarshal(headerJSON, &museResponse.Headers); err != nil {
+	if err = json.Unmarshal(headerJSON, &response.Headers); err != nil {
 		return err
 	}
 
@@ -98,12 +120,12 @@ func (museResponse *MuseResponse) fromRawBytes(data []byte) error {
 	// This only matters for commands, not events we receive due to subscriptions.  This should
 	// be cleaned up a bit to track subscriptions and missing command responses, but it kind
 	// of works for now.
-	if museResponse.Headers.CmdId != "" && museResponse.Headers.Success != true {
-		return fmt.Errorf("MuseResponse failed: %s: %v", museResponse.Headers.Namespace, parsed[0])
+	if response.Headers.CmdId != "" && response.Headers.Success != true {
+		return fmt.Errorf("MuseResponse failed: %s: %v", response.Headers.Namespace, parsed[0])
 	}
 
 	// Recreate the body JSON so we can parse it again later.  WOOO?
-	if museResponse.BodyJSON, err = json.Marshal(parsed[1]); err != nil {
+	if response.BodyJSON, err = json.Marshal(parsed[1]); err != nil {
 		return err
 	}
 

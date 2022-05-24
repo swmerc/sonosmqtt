@@ -15,13 +15,9 @@ type MDNSDevice struct {
 	IP      string
 	Port    int
 	InfoUrl string
-
-	// Generated (and hacky, but it saves having to hit /info most of the time)
-	BaseUrl string
-	RestUrl string
 }
 
-func (p MDNSDevice) string() string {
+func (p *MDNSDevice) String() string {
 	return fmt.Sprintf("ip=%v, port=%d, info=%s", p.IP, p.Port, p.InfoUrl)
 }
 
@@ -33,16 +29,12 @@ func (p *MDNSDevice) init(e *zeroconf.ServiceEntry) {
 	for _, value := range e.Text {
 		split := strings.Split(value, "=")
 		if len(split) == 2 && split[0] == "info" {
-			p.InfoUrl = split[1]
+			p.InfoUrl = fmt.Sprintf("https://%s:%d%s", p.IP, p.Port, split[1])
 		}
 	}
-
-	// Generate the Base and REST Urls
-	p.BaseUrl = fmt.Sprintf("https://%s:%d", p.IP, p.Port)
-	p.RestUrl = fmt.Sprintf("%s/api", p.BaseUrl)
 }
 
-func scanForPlayers(scanTimeInSeconds uint) []MDNSDevice {
+func ScanForPlayersViaMDNS(scanTimeInSeconds uint) []MDNSDevice {
 	// Discover all services on the network (e.g. _workstation._tcp)
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
@@ -59,7 +51,7 @@ func scanForPlayers(scanTimeInSeconds uint) []MDNSDevice {
 		for entry := range results {
 			var p MDNSDevice
 			p.init(entry)
-			log.Debugf("mDNS: %s", p.string())
+			log.Debugf("mDNS: %s", p.String())
 			*players = append(*players, p)
 		}
 	}(entryChannel, &devices)
