@@ -392,33 +392,44 @@ func (app *App) discoverPlayer() *Player {
 	// The loop is a bit funky since we currently can reject players if something goes wrong.  All errors
 	// are continues so we try the next player in the array
 	//
-	for _, mdnsDevice := range ScanForPlayersViaMDNS(app.config.Sonos.ScanTime) {
+	for _, mdnsDevice := range sonos.ScanForPlayersViaMDNS(app.config.Sonos.ScanTime) {
 
-		// New player. Hit /info to get the player and /groups to get the rest of them
-		body, err := app.museGetRest(mdnsDevice.InfoUrl)
+		hhid, err := mdnsDevice.GetHouseholdId()
 		if err != nil {
-			log.Errorf("Unable to fetch info from %s: %s)", mdnsDevice.InfoUrl, err.Error())
+			log.Errorf("app: %s", err.Error())
 			continue
-		}
-
-		var info sonos.PlayerInfoResponse
-		log.Debugf("PlayerInfo: %s", string(body))
-		if json.Unmarshal(body, &info) != nil {
-			log.Errorf("Unable to parse response from /info")
 		}
 
 		// If we are looking for a specific HHID, skip players in different HHs.  If not,
 		// we latch the first HHID we see and skip players from other HHs.  I suspect the
 		// final variant will report data for all HHs, but I'm sticking with tracking
 		// a single player in a single HH for now.
-		thisPlayer := newInternalPlayerFromInfoResponse(info)
-		if len(app.config.Sonos.HouseholdId) != 0 && stripMuseHouseholdId(thisPlayer.HouseholdId) != app.config.Sonos.HouseholdId {
-			log.Debugf("HHID filtered: %s", thisPlayer.HouseholdId)
+		if len(app.config.Sonos.HouseholdId) != 0 && hhid != app.config.Sonos.HouseholdId {
+			log.Debugf("HHID filtered: %s", hhid)
 			continue
 		}
 
-		// Finally ready to admit that we like this player.  Return it.
-		return thisPlayer
+		infoUrl, err := mdnsDevice.GetInfoUrl()
+		if err != nil {
+			log.Errorf("app: %s", err.Error())
+			continue
+		}
+
+		// New player. Hit /info to get the player data
+		body, err := app.museGetRest(infoUrl)
+		if err != nil {
+			log.Errorf("app: %s", err.Error())
+			continue
+		}
+
+		// Parse it and return our happy player so the caller can hit /groups
+		var info sonos.PlayerInfoResponse
+		log.Debugf("PlayerInfo: %s", string(body))
+		if json.Unmarshal(body, &info) != nil {
+			log.Errorf("Unable to parse response from /info")
+		}
+
+		return newInternalPlayerFromInfoResponse(info)
 	}
 
 	// Did not find anything at all.  Weeee.
