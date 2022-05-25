@@ -25,7 +25,7 @@ const (
 	Listen
 )
 
-type MuseResponseWithId struct {
+type SonosResponseWithId struct {
 	playerId string
 	sonos.Response
 }
@@ -52,7 +52,7 @@ type App struct {
 	//
 	//       I'll parse it all in one goroutine for now.  I don't expect a ton of
 	//       traffic anyway.
-	responseChannel chan MuseResponseWithId
+	responseChannel chan SonosResponseWithId
 	errorChannel    chan ErrorWithId
 
 	// Groups is a map of every group indexed by PlayerId of the coordinator, and groupsSource
@@ -73,7 +73,7 @@ func NewApp(config Config, client mqtt.Client) *App {
 		config:          config,
 		mqttClient:      client,
 		currentState:    Idle,
-		responseChannel: make(chan MuseResponseWithId),
+		responseChannel: make(chan SonosResponseWithId),
 		errorChannel:    make(chan ErrorWithId),
 		groups:          map[string]Group{},
 		groupsSource:    "",
@@ -141,9 +141,6 @@ func (app *App) run() {
 				<-app.responseChannel
 			}
 
-			// Clear last metadata so the next one is seen as new
-			// app.lastMetadata = MusePlaybackExtendedResponse{}
-
 			//
 			// Create websockets and hook up the callbacks
 			//
@@ -199,7 +196,7 @@ func (app *App) run() {
 	}
 }
 
-func (app *App) handleResponse(msg MuseResponseWithId) {
+func (app *App) handleResponse(msg SonosResponseWithId) {
 	// Handle subscription responses
 	if msg.Headers.Response == "subscribe" {
 		log.Debugf("app: subscribed to %s: %s", msg.Headers.Namespace, msg.playerId)
@@ -257,7 +254,7 @@ func (app *App) handleResponse(msg MuseResponseWithId) {
 
 		// Simplify?
 		if app.config.Sonos.Simplify {
-			simplifyMuseType(&msg)
+			simplifySonosType(&msg)
 		}
 
 		// Fan it out?
@@ -293,16 +290,16 @@ func (app *App) OnError(id string, err error) {
 
 func (app *App) OnMessage(id string, data []byte) {
 	// Parse the response
-	var museResponse sonos.Response
-	if err := museResponse.FromRawBytes(data); err != nil {
+	var sonosResponse sonos.Response
+	if err := sonosResponse.FromRawBytes(data); err != nil {
 		log.Errorf("app: unable to parse: %s (%s)", err.Error(), string(data))
 	}
 
-	//log.Debugf("RX: Player: %s, Headers: %v, Body: %s", id, museResponse.Headers, museResponse.BodyJSON)
+	//log.Debugf("RX: Player: %s, Headers: %v, Body: %s", id, sonosResponse.Headers, sonosResponse.BodyJSON)
 
-	app.responseChannel <- MuseResponseWithId{
+	app.responseChannel <- SonosResponseWithId{
 		playerId: id,
-		Response: museResponse,
+		Response: sonosResponse,
 	}
 }
 
@@ -390,7 +387,7 @@ func (app *App) discoverPlayer() *Player {
 		}
 
 		// New player. Hit /info to get the player data
-		body, err := app.museGetRest(infoUrl)
+		body, err := app.getRESTWithApiKey(infoUrl)
 		if err != nil {
 			log.Errorf("app: %s", err.Error())
 			continue
@@ -416,7 +413,7 @@ func (app *App) discoverPlayer() *Player {
 // final player but it seems silly.  We need REST for GetInfo anyway.
 //
 func (app *App) getGroupsRest(p *Player) (sonos.GroupsResponse, error) {
-	raw, err := app.museGetRestFromPlayer(p, "/v1/households/local/groups")
+	raw, err := app.getRESTFromPlayer(p, "/v1/households/local/groups")
 
 	if err != nil {
 		return sonos.GroupsResponse{}, err
@@ -435,11 +432,11 @@ func (a *App) addApiKey(header *http.Header) {
 }
 
 //
-// Muse REST support.  Note that this is in App since it needs the api key from the config.  Ew?
+// Sonos REST support.  Note that this is in App since it needs the api key from the config.  Ew?
 //
 // I could split it out into another class and pass in the key at init time, I suppose.
 //
-func (a *App) museGetRest(fullUrl string) ([]byte, error) {
+func (a *App) getRESTWithApiKey(fullUrl string) ([]byte, error) {
 	// FIXME: Can we just fix the CN, or are there really self signed?
 	customTransport := http.DefaultTransport.(*http.Transport).Clone()
 	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -472,6 +469,6 @@ func (a *App) museGetRest(fullUrl string) ([]byte, error) {
 	return data, nil
 }
 
-func (a *App) museGetRestFromPlayer(p *Player, path string) ([]byte, error) {
-	return a.museGetRest(fmt.Sprintf("%s%s", p.RestUrl, path))
+func (a *App) getRESTFromPlayer(p *Player, path string) ([]byte, error) {
+	return a.getRESTWithApiKey(fmt.Sprintf("%s%s", p.RestUrl, path))
 }

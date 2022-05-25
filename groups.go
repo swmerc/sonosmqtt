@@ -33,7 +33,7 @@ func getGroupMap(hhid string, groupsResponse sonos.GroupsResponse) (map[string]G
 	for _, group := range groupsResponse.Groups {
 		if coordinator, ok := allPlayers[group.CoordinatorId]; ok {
 
-			// We now know groupId.  This is good because we need it for the Muse headers later.
+			// We now know groupId.  This is good because we need it for the command headers later.
 			//
 			// I could likely pull this out of Player and toss it into Group when we subscribe to all groups?
 			coordinator.GroupId = group.Id

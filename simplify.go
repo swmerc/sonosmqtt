@@ -7,12 +7,12 @@ import (
 	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
-// simplifyMuseType converts between the possibly complex type returned by Muse to a much
+// simplifySonosType converts between the possibly complex type returned by Sonos to a much
 // simpler type suitable for a dumb device.
 //
 // FIXME: I should probably pass msg to the simplifiers so they can change the Type as
 //        well.  Too hacky to assume it here.
-func simplifyMuseType(msg *MuseResponseWithId) {
+func simplifySonosType(msg *SonosResponseWithId) {
 	if f, ok := simplfiers[msg.Headers.Type]; ok {
 		if body, err := f(msg.Response.BodyJSON); err == nil {
 			msg.Headers.Type = msg.Headers.Type + "Simple"

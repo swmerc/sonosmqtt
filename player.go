@@ -27,10 +27,6 @@ type Player struct {
 //
 // Functions to cheat and create data that the API doesn't provide at the time it is needed
 //
-func stripMuseHouseholdId(hhid string) string {
-	return hhid[:strings.LastIndex(hhid, ".")]
-}
-
 func groupIdToCoordinatorId(groupId string) string {
 	last := strings.LastIndex(groupId, ":")
 
@@ -48,7 +44,7 @@ func restUrlFromWebsocketUrl(websocketUrl string) string {
 
 //
 // Functions to generate all of the data we need to talk to a player from a couple of sources.  I suppose
-// I could just use one of the existing structs from Muse and add in what I need.
+// I could just use one of the existing structs from Sonos responses and add in what I need.
 //
 
 // newInternalPlayerFromInfoResponse takes the data returned from /info and turns it into
