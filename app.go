@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,7 +68,7 @@ type App struct {
 	groupUpdate map[string]Group
 
 	// Cache of data we sent over MQTT
-	mqttCache map[string][]byte
+	mqttCache map[string]bool
 }
 
 func NewApp(config Config, client mqtt.Client) *App {
@@ -80,7 +81,7 @@ func NewApp(config Config, client mqtt.Client) *App {
 		groups:          map[string]Group{},
 		groupsSource:    "",
 		groupUpdate:     map[string]Group{},
-		mqttCache:       map[string][]byte{},
+		mqttCache:       map[string]bool{},
 	}
 }
 
@@ -205,6 +206,7 @@ func (app *App) run() {
 // the entire state machine needs to go, and this should simply return a new groupsMap if
 // we have one instead of kicking the state machine here.
 func (app *App) handleResponse(msg SonosResponseWithId) {
+
 	// Handle subscription responses
 	if msg.Headers.Response == "subscribe" {
 		log.Debugf("app: subscribed to %s: %s", msg.Headers.Namespace, msg.playerId)
@@ -218,29 +220,36 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 		return
 	}
 
-	player := group.Coordinator
-
 	// FIXME: Filter out errors here?
 
 	//
 	// Process the ones we care about.  Only one for now.
 	//
+	publishPlayers := false
 	if msg.Headers.Type == "groups" {
+
 		// Make sure we can parse it
 		groupsResponse := sonos.GroupsResponse{}
 		if err := json.Unmarshal(msg.BodyJSON, &groupsResponse); err != nil {
 			return
 		}
 
+		player := group.Coordinator
 		log.Infof("app: groups event: player=%s", player.Name)
 
 		// If the list of groups is different, kick the main state machine so we can connect to all of the correct players
 		if groups, err := getGroupMap(player.HouseholdId, groupsResponse); err == nil {
 			if !groupsAreCloseEnoughForMe(app.groups, groups) {
+				// This line is insanely slow...
+				app.RemoveStaleTopics(missingPlayers(app.groups, groups), missingGroups(app.groups, groups))
+
 				app.groupUpdate = groups
 				app.currentState = CreateWebsockets
 			}
 		}
+
+		// Always publish the players when we publish the groups
+		publishPlayers = true
 	}
 
 	// Pretty sure we can blindly fan out any events have a groupid to the group?  I guess this means:
@@ -257,32 +266,106 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 	log.Debugf("app: handleResponse: id=%s: namespace=%s, type=%s, hhid=%s, groupid=%s", msg.playerId, msg.Headers.Namespace, msg.Headers.Type, msg.Headers.HouseholdId, msg.Headers.GroupId)
 
 	if app.mqttClient != nil {
-		path := app.config.MQTT.Topic
 
 		// Simplify?
 		if app.config.Sonos.Simplify {
 			simplifySonosType(&msg)
 		}
 
-		// Fan it out?
-		if msg.Headers.GroupId == "" {
-			hhPath := fmt.Sprintf("%s/%s", path, msg.Headers.Type)
-			app.PublishViaMQTT(hhPath, msg.BodyJSON)
-		} else if app.config.Sonos.FanOut {
-			for _, player := range group.Players {
-				playerPath := fmt.Sprintf("%s/%s/%s", path, player.PlayerId, msg.Headers.Type)
-				app.PublishViaMQTT(playerPath, msg.BodyJSON)
-			}
-		} else {
-			groupPath := fmt.Sprintf("%s/%s/%s", path, group.Coordinator.GroupId, msg.Headers.Type)
-			app.PublishViaMQTT(groupPath, msg.BodyJSON)
-		}
+		app.PublishEventToAllTopics(group, &msg)
 
-		// KLUDGE: Publish players if groups changed?
-		if app.groupUpdate != nil {
-			hhPath := fmt.Sprintf("%s/%s", path, "players")
-			bytes, _ := getPlayersJSONFromGroupMap(app.groupUpdate)
-			app.PublishViaMQTT(hhPath, bytes)
+		// Publish players if needed.  A little tricky the first time around since we
+		// always get an event even though we grabbed the groups via REST before
+		// we subscribed.  This means that the first time through the right map
+		// is app.groups.
+		//
+		// I really need to refactor all of this and dump app.groupUpdate entirely.
+		if publishPlayers {
+			groups := &app.groups
+			if len(app.groupUpdate) != 0 {
+				groups = &app.groupUpdate
+			}
+			hhPath := fmt.Sprintf("%s/%s", app.config.MQTT.Topic, "players")
+			bytes, _ := getPlayersJSONFromGroupMap(*groups)
+			app.PublishEventToTopic(hhPath, bytes)
+		}
+	}
+}
+
+func (app *App) PublishEventToAllTopics(group Group, msg *SonosResponseWithId) {
+
+	// Paths
+	//
+	// Household events:
+	//   {app.config.MQTT.Topic}/v1/events/{msg.Headers.Type}
+	//
+	// Group events:
+	//   Fanout disabled:
+	//     {app.config.MQTT.Topic}/v1/events/group/{coordinatorId}/{msg.Headers.Type}
+	//   Fanout enabled:
+	//     {app.config.MQTT.Topic}/v1/events/player/{playerIdForEachPlayerInGroup}/{msg.Headers.Type}
+	//
+	// Player events (eventually):
+	//     {app.config.MQTT.Topic}/v1/events/player/{playerId}/{msg.Headers.Type}
+	//
+	// NOTE: This currently assumes that namespace does not really matter for events.  More
+	//       specifically that there are no Types with the same name in different namespaces
+	//       unless they are really the same Type.  Probably a bad assumption, but it cleans
+	//       up the paths a bit.  We can always add {msg.Headers.Namespace} back in the path
+	//       if we care.
+	if msg.Headers.GroupId == "" {
+		hhPath := fmt.Sprintf("%s/%s", app.config.MQTT.Topic, msg.Headers.Type)
+		app.PublishEventToTopic(hhPath, msg.BodyJSON)
+	} else {
+		groupPath := fmt.Sprintf("%s/group/%s/%s", app.config.MQTT.Topic, group.Coordinator.PlayerId, msg.Headers.Type)
+		app.PublishEventToTopic(groupPath, msg.BodyJSON)
+		if app.config.Sonos.FanOut {
+			for _, player := range group.Players {
+				playerPath := fmt.Sprintf("%s/player/%s/%s", app.config.MQTT.Topic, player.PlayerId, msg.Headers.Type)
+				app.PublishEventToTopic(playerPath, msg.BodyJSON)
+			}
+		}
+	}
+}
+
+// PublishEventToTopic publishes a byte slice to a single MQTT topic.  It also keeps track of the topics
+// we have published to so we can clear them later as needed.
+func (app *App) PublishEventToTopic(topic string, body []byte) {
+
+	// Stash it.  Memory is cheap.
+	app.mqttCache[topic] = true
+
+	// Publish
+	//
+	// NOTE: We currently send this at a QoS of 1 and retain.  Retaining is a pain, and in part why we
+	//       have the cache.  If we dump retain and add a method for refreshing the content when a new
+	//       device connects (likely via the device eventing), we can skip retain.  The downside is that
+	//       every subscriber will get a full data dump when a new subscriber is added.
+	// log.Debugf("app: cache miss: %s", topic)
+	app.mqttClient.Publish(topic, 1, true, body)
+}
+
+//
+func (app *App) RemoveStaleTopics(players []string, groups []string) {
+	var prefixes []string = make([]string, 0, 32)
+
+	for _, player := range players {
+		prefixes = append(prefixes, fmt.Sprintf("%s/v1/events/player/%s", app.config.MQTT.Topic, player))
+	}
+
+	for _, group := range groups {
+		prefixes = append(prefixes, fmt.Sprintf("%s/v1/events/group/%s", app.config.MQTT.Topic, group))
+	}
+
+	log.Infof("app: prefixes: %s", strings.Join(prefixes, ","))
+	for topic := range app.mqttCache {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(topic, prefix) {
+				log.Infof("app: clearing %s", topic)
+				delete(app.mqttCache, topic)
+				app.mqttClient.Publish(topic, 1, false, "")
+				break
+			}
 		}
 	}
 }
@@ -290,10 +373,15 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 //
 // All of On* callbacks are run in the websocket's goroutines
 //
+
+// OnConnect is called when a websocket connection is established. This is run in
+// a goroutine owned by the websocket.
 func (app *App) OnConnect(id string) {
 	log.Infof("app: connected to %s", id)
 }
 
+// OnError is called when a websocket error has occurred.  This is run in a goroutine
+// owned by the websocket.
 func (app *App) OnError(id string, err error) {
 	app.errorChannel <- ErrorWithId{
 		playerId: id,
@@ -301,6 +389,8 @@ func (app *App) OnError(id string, err error) {
 	}
 }
 
+// OnMessage is called when a message is received from a websocket.  This is run in
+// a goroutine owned by the websocket.
 func (app *App) OnMessage(id string, data []byte) {
 	// Parse the response
 	var sonosResponse sonos.Response
@@ -308,36 +398,16 @@ func (app *App) OnMessage(id string, data []byte) {
 		log.Errorf("app: unable to parse: %s (%s)", err.Error(), string(data))
 	}
 
-	//log.Debugf("RX: Player: %s, Headers: %v, Body: %s", id, sonosResponse.Headers, sonosResponse.BodyJSON)
-
 	app.responseChannel <- SonosResponseWithId{
 		playerId: id,
 		Response: sonosResponse,
 	}
 }
 
+// OnClose is called when a websocket connection is closed.  This is run in a goroutine
+// owned by the websocket.
 func (app *App) OnClose(id string) {
 	log.Infof("app: connection lost: %s", id)
-}
-
-//
-// MQTT publishing all goes through here so I can check a cache.  Slow and unbounded memory usage.  WOOO.
-//
-func (app *App) PublishViaMQTT(topic string, body []byte) {
-	// If this is an exact match, don't publish again
-	if last, ok := app.mqttCache[topic]; ok {
-		if bytes.Equal(body, last) {
-			log.Debugf("app: cache hit:  %s", topic)
-			return
-		}
-	}
-
-	// Stash it.  Memory is cheap.
-	app.mqttCache[topic] = body
-
-	// Publish
-	log.Debugf("app: cache miss: %s", topic)
-	app.mqttClient.Publish(topic, 1, true, body)
 }
 
 //

@@ -86,8 +86,49 @@ func groupsAreCloseEnoughForMe(a, b map[string]Group) bool {
 				return false
 			}
 		}
-
 	}
 
 	return true
+}
+
+func missingGroups(old, new map[string]Group) []string {
+	var missing = make([]string, 0, 32)
+
+	for id, origGroup := range old {
+		if newGroup, ok := new[id]; ok {
+			if newGroup.Coordinator.GroupId == origGroup.Coordinator.GroupId {
+				continue
+			}
+		}
+		missing = append(missing, origGroup.Coordinator.GroupId)
+	}
+
+	return missing
+}
+
+func getPlayers(groups map[string]Group) map[string]bool {
+	var playerMap = make(map[string]bool)
+
+	for _, group := range groups {
+		for id := range group.Players {
+			playerMap[id] = true
+		}
+	}
+
+	return playerMap
+}
+
+func missingPlayers(oldGroups, newGroups map[string]Group) []string {
+	var missing = make([]string, 0, 32)
+
+	oldPlayers := getPlayers(oldGroups)
+	newPlayers := getPlayers(newGroups)
+
+	for id := range oldPlayers {
+		if _, ok := newPlayers[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+
+	return missing
 }
