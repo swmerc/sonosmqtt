@@ -37,6 +37,11 @@ type Config struct {
 		Config MQTTConfig `yaml:"broker"`
 		Topic  string     `yaml:"topic"`
 	} `yaml:"mqtt"`
+
+	// Web server
+	WebServer struct {
+		Port int `yaml:"port"`
+	} `yaml:"webserver"`
 }
 
 // main entry point.  It just handles loading config and firing up the MQTT client
@@ -66,8 +71,11 @@ func main() {
 		return
 	}
 
-	// Fire up the actual app
+	// App and webserver
 	app := NewApp(config, client)
+	StartWebServer(config.WebServer.Port, app)
+
+	// Kick it all off
 	app.run()
 }
 
@@ -79,6 +87,7 @@ func loadConfigFile(cfgPath string) (Config, error) {
 	// Apply defaults
 	config := Config{}
 	config.Sonos.ScanTime = 5
+	config.WebServer.Port = 8000
 
 	// Pull in content from the file
 	f, err := os.Open(cfgPath)
@@ -93,7 +102,7 @@ func loadConfigFile(cfgPath string) (Config, error) {
 	// Manually check the required stuff.  Shame this is not built in.
 	if err == nil {
 		if len(config.Sonos.ApiKey) == 0 {
-			err = fmt.Errorf("API key must be present in the configuration file.")
+			err = fmt.Errorf("API key must be present in the configuration file")
 		}
 	}
 
@@ -133,7 +142,7 @@ func initMQTTClient(config MQTTConfig) (mqtt.Client, error) {
 	opts.SetClientID(config.Client)
 
 	// Make sure username/password is secure
-	if config.TLS == false && (len(config.Username)+len(config.Password) > 0) {
+	if !config.TLS && (len(config.Username)+len(config.Password) > 0) {
 		log.Fatalf("mqtt: username/password auth with no TLS? Can't let you do it.")
 	}
 
@@ -162,7 +171,7 @@ func initMQTTClient(config MQTTConfig) (mqtt.Client, error) {
 	// misconfigured MQTT broker.
 	//
 	client := mqtt.NewClient(opts)
-	for true {
+	for {
 		if token := client.Connect(); token.Wait() && token.Error() != nil {
 			log.Infof("mqtt: error connecting to broker %s:%d at start: %s", config.Host, config.Port, token.Error())
 			time.Sleep(time.Duration(1) * time.Minute)

@@ -10,18 +10,25 @@ import (
 type Player struct {
 	// Stuff from /info or /groups.  Not quite static, but we'll regenerate if GroupId changes so this is
 	// all static enough for our purposes.
-	Name          string
-	PlayerId      string
-	GroupId       string
-	CoordinatorId string
-	HouseholdId   string
-	RestUrl       string
-	WebsocketUrl  string
+	//
+	// We send a subset of this out over REST when asked, but the rest is internal.  The callers don't need
+	// the Urls, for example, because they do not need them to talk to the players.  We handle all of that
+	// on their behalf.
+	//
+	// Heck, callers don't even need CoordinatorId since they can use the id of any player in the group
+	// to do group things.
+	PlayerId      string `json:"id"`
+	Name          string `json:"name"`
+	GroupId       string `json:"-"`
+	CoordinatorId string `json:"-"`
+	HouseholdId   string `json:"-"`
+	RestUrl       string `json:"-"`
+	WebsocketUrl  string `json:"-"`
 
-	CmdId int32
+	CmdId int32 `json:"-"`
 
 	// Websocket to the player.  All players we are tracking will have one.
-	Websocket WebsocketClient
+	Websocket WebsocketClient `json:"-"`
 }
 
 //
@@ -78,6 +85,13 @@ func newInternalPlayerFromSonosPlayer(player sonos.Player, householdId string, g
 		CmdId:         1,
 		Websocket:     nil,
 	}
+}
+
+func (p *Player) createFullRESTUrl(subpath string) string {
+	// Yup, we assume V1 and local HH.  No idea why the LAN variant has multi HH support when the
+	// players do not.  Unless it is to match the cloud API, but the "local" bit makes it not match
+	// anyway.
+	return fmt.Sprintf("%s/v1/households/local%s", p.RestUrl, subpath)
 }
 
 func (p *Player) String() string {

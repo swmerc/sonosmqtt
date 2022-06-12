@@ -71,7 +71,7 @@ func groupsAreCloseEnoughForMe(a, b map[string]Group) bool {
 
 		// Miss
 		groupMatch, ok := b[id]
-		if ok != true {
+		if !ok {
 			return false
 		}
 
@@ -82,7 +82,7 @@ func groupsAreCloseEnoughForMe(a, b map[string]Group) bool {
 
 		// Walk the players.  Almost done.
 		for id := range group.Players {
-			if _, ok := groupMatch.Players[id]; ok != true {
+			if _, ok := groupMatch.Players[id]; !ok {
 				return false
 			}
 		}

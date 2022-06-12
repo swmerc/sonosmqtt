@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -58,6 +59,7 @@ type App struct {
 	// Groups is a map of every group indexed by PlayerId of the coordinator, and groupsSource
 	// is the PlayerId of the player we subscribed to the groups namespace on.  It is a little
 	// special since we need to switch it if that websocket bounces.
+	groupsLock   sync.RWMutex
 	groups       map[string]Group
 	groupsSource string
 
@@ -89,7 +91,7 @@ func (app *App) run() {
 	//
 	// Spin forever, because we have nothing better to do
 	//
-	for true {
+	for {
 
 		if lastState != app.currentState {
 			log.Infof("app: state change: %d -> %d", lastState, app.currentState)
@@ -130,7 +132,10 @@ func (app *App) run() {
 			}
 
 			// Prepare to switch over to the new group list
+			app.groupsLock.Lock()
 			app.groups = app.groupUpdate
+			app.groupsLock.Unlock()
+
 			app.groupUpdate = nil
 
 			// Empty channels now that the websocket is down and not generating new events
@@ -196,6 +201,9 @@ func (app *App) run() {
 	}
 }
 
+// handleResponse is run on the main goroutine so it can muck with the state machine. Yup,
+// the entire state machine needs to go, and this should simply return a new groupsMap if
+// we have one instead of kicking the state machine here.
 func (app *App) handleResponse(msg SonosResponseWithId) {
 	// Handle subscription responses
 	if msg.Headers.Response == "subscribe" {
@@ -205,7 +213,7 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 
 	// Look up the group
 	group, ok := app.groups[msg.playerId]
-	if ok == false {
+	if !ok {
 		log.Errorf("app: handleResponse: unknown player: %s", msg.playerId)
 		return
 	}
@@ -228,10 +236,9 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 
 		// If the list of groups is different, kick the main state machine so we can connect to all of the correct players
 		if groups, err := getGroupMap(player.HouseholdId, groupsResponse); err == nil {
-			if groupsAreCloseEnoughForMe(app.groups, groups) != true {
+			if !groupsAreCloseEnoughForMe(app.groups, groups) {
 				app.groupUpdate = groups
 				app.currentState = CreateWebsockets
-				return
 			}
 		}
 	}
@@ -250,7 +257,7 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 	log.Debugf("app: handleResponse: id=%s: namespace=%s, type=%s, hhid=%s, groupid=%s", msg.playerId, msg.Headers.Namespace, msg.Headers.Type, msg.Headers.HouseholdId, msg.Headers.GroupId)
 
 	if app.mqttClient != nil {
-		path := fmt.Sprintf("%s", app.config.MQTT.Topic)
+		path := app.config.MQTT.Topic
 
 		// Simplify?
 		if app.config.Sonos.Simplify {
@@ -270,8 +277,14 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 			groupPath := fmt.Sprintf("%s/%s/%s", path, group.Coordinator.GroupId, msg.Headers.Type)
 			app.PublishViaMQTT(groupPath, msg.BodyJSON)
 		}
-	}
 
+		// KLUDGE: Publish players if groups changed?
+		if app.groupUpdate != nil {
+			hhPath := fmt.Sprintf("%s/%s", path, "players")
+			bytes, _ := getPlayersJSONFromGroupMap(app.groupUpdate)
+			app.PublishViaMQTT(hhPath, bytes)
+		}
+	}
 }
 
 //
@@ -313,7 +326,7 @@ func (app *App) OnClose(id string) {
 func (app *App) PublishViaMQTT(topic string, body []byte) {
 	// If this is an exact match, don't publish again
 	if last, ok := app.mqttCache[topic]; ok {
-		if bytes.Compare(body, last) == 0 {
+		if bytes.Equal(body, last) {
 			log.Debugf("app: cache hit:  %s", topic)
 			return
 		}
@@ -387,7 +400,7 @@ func (app *App) discoverPlayer() *Player {
 		}
 
 		// New player. Hit /info to get the player data
-		body, err := app.getRESTWithApiKey(infoUrl)
+		body, err := app.doRESTWithApiKey(infoUrl, http.MethodGet, nil)
 		if err != nil {
 			log.Errorf("app: %s", err.Error())
 			continue
@@ -413,7 +426,7 @@ func (app *App) discoverPlayer() *Player {
 // final player but it seems silly.  We need REST for GetInfo anyway.
 //
 func (app *App) getGroupsRest(p *Player) (sonos.GroupsResponse, error) {
-	raw, err := app.getRESTFromPlayer(p, "/v1/households/local/groups")
+	raw, err := app.playerDoGET(p, "/groups")
 
 	if err != nil {
 		return sonos.GroupsResponse{}, err
@@ -436,27 +449,32 @@ func (a *App) addApiKey(header *http.Header) {
 //
 // I could split it out into another class and pass in the key at init time, I suppose.
 //
-func (a *App) getRESTWithApiKey(fullUrl string) ([]byte, error) {
+func (a *App) doRESTWithApiKey(fullUrl string, method string, body []byte) ([]byte, error) {
 	// FIXME: Can we just fix the CN, or are there really self signed?
 	customTransport := http.DefaultTransport.(*http.Transport).Clone()
 	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client := &http.Client{Transport: customTransport}
 
-	request, err := http.NewRequest(http.MethodGet, fullUrl, nil)
+	log.Infof("REST: %s URL=%s", method, fullUrl)
+
+	request, err := http.NewRequest(method, fullUrl, bytes.NewBuffer(body))
 	if err != nil {
+		log.Errorf("REST: NewRequest: %s", err.Error())
 		return nil, err
 	}
 	a.addApiKey(&request.Header)
+	request.Header.Add("Content-Type", "application/json")
 
-	log.Debugf("REST: URL=%s", fullUrl)
 	response, err := client.Do(request)
 	if err != nil {
+		log.Errorf("REST: Do: %s", err.Error())
 		return nil, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Bad HTTP status for %s: %d", fullUrl, response.StatusCode)
+		log.Errorf("REST: StatusCode: %d", response.StatusCode)
+		return nil, fmt.Errorf("code: %d", response.StatusCode)
 	}
 
 	data, err := ioutil.ReadAll(response.Body)
@@ -464,11 +482,30 @@ func (a *App) getRESTWithApiKey(fullUrl string) ([]byte, error) {
 		return nil, err
 	}
 
-	// log.Debugf("REST: resp: body=%s", string(data))
-
 	return data, nil
 }
 
-func (a *App) getRESTFromPlayer(p *Player, path string) ([]byte, error) {
-	return a.getRESTWithApiKey(fmt.Sprintf("%s%s", p.RestUrl, path))
+func (a *App) playerDoGET(p *Player, path string) ([]byte, error) {
+	return a.doRESTWithApiKey(p.createFullRESTUrl(path), http.MethodGet, nil)
+}
+
+func (a *App) playerDoPOST(p *Player, path string, body []byte) ([]byte, error) {
+	return a.doRESTWithApiKey(p.createFullRESTUrl(path), http.MethodPost, body)
+}
+
+//
+// Data munging
+//
+func getPlayersJSONFromGroupMap(groups map[string]Group) ([]byte, error) {
+	// Convert to an array since the map is useless to the end users.  Ew.
+	var playerArray []*Player = make([]*Player, 0, 64)
+	for _, g := range groups {
+		for _, p := range g.Players {
+			playerArray = append(playerArray, p)
+		}
+	}
+
+	// Send it out
+	bytes, err := json.Marshal(playerArray)
+	return bytes, err
 }

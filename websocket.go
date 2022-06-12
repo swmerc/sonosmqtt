@@ -88,7 +88,7 @@ func (ws *websocketImpl) SendMessage(data []byte) error {
 		ws.sendChan <- []byte(data)
 		return nil
 	}
-	return fmt.Errorf("Send while not running")
+	return fmt.Errorf("send while not running")
 }
 
 func (ws *websocketImpl) Close() {
@@ -201,7 +201,7 @@ func (ws *websocketImpl) writeGoroutine() {
 			n := len(ws.sendChan)
 			for i := 0; i < n; i++ {
 				w.Write(newline)
-				message, _ = <-ws.sendChan
+				message = <-ws.sendChan
 				w.Write(message)
 			}
 
