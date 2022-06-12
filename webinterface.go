@@ -31,24 +31,24 @@ func exportedGroupFromGroup(group Group) ExportedGroup {
 }
 
 // GetGroups returns a list of al ExportedGroups
-func (a *App) GetGroups() ([]byte, error) {
+func (app *App) GetGroups() ([]byte, error) {
 	groups := make([]ExportedGroup, 0, 64)
 
-	a.groupsLock.RLock()
-	for _, group := range a.groups {
+	app.groupsLock.RLock()
+	for _, group := range app.groups {
 		groups = append(groups, exportedGroupFromGroup(group))
 	}
-	a.groupsLock.RUnlock()
+	app.groupsLock.RUnlock()
 
 	return json.Marshal(groups)
 }
 
 // GetGroup returns a single ExportedGroup with the matching CoordinatorId
-func (a *App) GetGroup(id string) ([]byte, error) {
+func (app *App) GetGroup(id string) ([]byte, error) {
 
-	a.groupsLock.RLock()
-	group, ok := a.groups[id]
-	a.groupsLock.RUnlock()
+	app.groupsLock.RLock()
+	group, ok := app.groups[id]
+	app.groupsLock.RUnlock()
 
 	if ok {
 		return json.Marshal(exportedGroupFromGroup(group))
@@ -57,32 +57,32 @@ func (a *App) GetGroup(id string) ([]byte, error) {
 	return nil, fmt.Errorf("404")
 }
 
-func (a *App) GetPlayers() ([]byte, error) {
+func (app *App) GetPlayers() ([]byte, error) {
 	players := make([]*Player, 0, 64)
 
-	a.groupsLock.RLock()
-	for _, group := range a.groups {
+	app.groupsLock.RLock()
+	for _, group := range app.groups {
 		for _, player := range group.Players {
 			players = append(players, player)
 		}
 	}
-	a.groupsLock.RUnlock()
+	app.groupsLock.RUnlock()
 
 	return json.Marshal(players)
 }
 
-func (a *App) GetPlayer(id string) ([]byte, error) {
+func (app *App) GetPlayer(id string) ([]byte, error) {
 	player := &Player{}
 	ok := false
 
-	a.groupsLock.RLock()
-	for _, group := range a.groups {
+	app.groupsLock.RLock()
+	for _, group := range app.groups {
 		player, ok = group.Players[id]
 		if ok {
 			break
 		}
 	}
-	a.groupsLock.RUnlock()
+	app.groupsLock.RUnlock()
 
 	if ok {
 		return json.Marshal(player)
@@ -96,20 +96,25 @@ var playerTargetedCommands = map[string]bool{
 	"playerVolume": true,
 }
 
-func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace string) (Player, string) {
+func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace string) (*Player, string) {
 
 	playerTargeted := playerTargetedCommands[namespace]
 
-	player := Player{}
+	var player *Player = nil
+
 	for _, g := range *groupMap {
 		if p, ok := g.Players[id]; ok {
 			if playerTargeted {
-				player = *p
+				player = p
 			} else {
-				player = *g.Coordinator
+				player = g.Coordinator
 			}
 			break
 		}
+	}
+
+	if player == nil {
+		return nil, ""
 	}
 
 	path := ""
@@ -122,12 +127,12 @@ func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace stri
 	return player, path
 }
 
-func (a *App) GetDataREST(id string, namespace string, object string) ([]byte, error) {
-	a.groupsLock.RLock()
-	player, path := getPlayerForNamespace(&a.groups, id, namespace)
-	a.groupsLock.RUnlock()
+func (app *App) GetDataREST(id string, namespace string, object string) ([]byte, error) {
+	app.groupsLock.RLock()
+	player, path := getPlayerForNamespace(&app.groups, id, namespace)
+	app.groupsLock.RUnlock()
 
-	if player.PlayerId == "" {
+	if player == nil {
 		return nil, fmt.Errorf("404")
 	}
 
@@ -140,17 +145,36 @@ func (a *App) GetDataREST(id string, namespace string, object string) ([]byte, e
 	} else {
 		fullpath = fmt.Sprintf("%s/%s", path, namespace)
 	}
-	return a.playerDoGET(&player, fullpath)
+	return app.playerDoGET(player, fullpath)
 }
 
-func (a *App) PostDataREST(id string, namespace string, command string, body []byte) ([]byte, error) {
-	a.groupsLock.RLock()
-	player, path := getPlayerForNamespace(&a.groups, id, namespace)
-	a.groupsLock.RUnlock()
+func (app *App) PostDataREST(id string, namespace string, command string, body []byte) ([]byte, error) {
+	app.groupsLock.RLock()
+	player, path := getPlayerForNamespace(&app.groups, id, namespace)
+	app.groupsLock.RUnlock()
 
-	if player.PlayerId == "" {
+	if player == nil {
 		return nil, fmt.Errorf("404")
 	}
 
-	return a.playerDoPOST(&player, fmt.Sprintf("%s/%s/%s", path, namespace, command), body)
+	return app.playerDoPOST(player, fmt.Sprintf("%s/%s/%s", path, namespace, command), body)
+}
+
+func (app *App) CommandOverWebsocket(id string, namespace string, command string) ([]byte, error) {
+	app.groupsLock.RLock()
+	player, _ := getPlayerForNamespace(&app.groups, id, namespace)
+	app.groupsLock.RUnlock()
+
+	if player == nil {
+		return nil, fmt.Errorf("404")
+	}
+
+	// Form a message and fire it down the websocket
+	if err := app.SendMessageToPlayer(player, namespace, command); err != nil {
+		return nil, fmt.Errorf("500: %s", err.Error())
+	}
+
+	// Assume success, at least for now.   This is just a test to make sure I understand how websocket
+	// commands can be mapped to REST.
+	return []byte(""), nil
 }

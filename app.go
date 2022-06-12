@@ -221,6 +221,10 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 	}
 
 	// FIXME: Filter out errors here?
+	if msg.Headers.Type == "none" || msg.Headers.Type == "globalError" {
+		log.Infof("msg: %v", msg)
+		return
+	}
 
 	//
 	// Process the ones we care about.  Only one for now.
@@ -421,6 +425,7 @@ func (app *App) SendMessageToPlayer(player *Player, namespace string, command st
 		Namespace:   namespace,
 		Command:     command,
 		HouseholdId: player.HouseholdId,
+		PlayerId:    player.PlayerId,
 		GroupId:     player.GroupId,
 		CmdId:       fmt.Sprintf("%d", cmdId),
 	}
@@ -434,7 +439,10 @@ func (app *App) SendMessageToPlayer(player *Player, namespace string, command st
 	// NOTE: If we are going to rate limit, this is where it should happen.  It adds a pile of complexity,
 	//       however, and we're not sending a ton of commands.
 	//
-	return player.Websocket.SendMessage([]byte(fmt.Sprintf("[%s,{}]", headersJSON)))
+	msg := fmt.Sprintf("[%s,{}]", headersJSON)
+	log.Infof("app: outgoing: %s", msg)
+
+	return player.Websocket.SendMessage([]byte(msg))
 }
 
 func (app *App) discoverPlayer() *Player {

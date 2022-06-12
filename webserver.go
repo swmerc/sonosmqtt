@@ -21,6 +21,8 @@ type WebDataInterface interface {
 	// Stuff that is just a passthrough to the normal Sonos API (currently via REST)
 	GetDataREST(id string, namespace string, command string) ([]byte, error)
 	PostDataREST(id string, namespace string, command string, body []byte) ([]byte, error)
+
+	CommandOverWebsocket(id string, namespace string, command string) ([]byte, error)
 }
 
 func StartWebServer(port int, data WebDataInterface) {
@@ -72,6 +74,11 @@ func StartWebServer(port int, data WebDataInterface) {
 			if err == nil {
 				bytes, err = data.PostDataREST(mux.Vars(r)["id"], mux.Vars(r)["namespace"], mux.Vars(r)["command"], body)
 			}
+			writeResponse(w, &bytes, err)
+		}).Methods("POST")
+
+		router.HandleFunc("/api/v1/wstest/{id}/{namespace}/{command}", func(w http.ResponseWriter, r *http.Request) {
+			bytes, err := data.CommandOverWebsocket(mux.Vars(r)["id"], mux.Vars(r)["namespace"], mux.Vars(r)["command"])
 			writeResponse(w, &bytes, err)
 		}).Methods("POST")
 
