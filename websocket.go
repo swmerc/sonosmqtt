@@ -29,7 +29,7 @@ type WebsocketClient interface {
 	IsRunning() bool
 }
 
-func NewWebSocket(url string, userData string, headers http.Header, callbacks WebsocketCallbacks) WebsocketClient {
+func NewClientWebSocket(url string, userData string, headers http.Header, callbacks WebsocketCallbacks) WebsocketClient {
 	ws := &websocketImpl{
 		userData:    userData,
 		callbacks:   callbacks,
@@ -38,7 +38,35 @@ func NewWebSocket(url string, userData string, headers http.Header, callbacks We
 		conn:        &websocket.Conn{},
 		sendChan:    make(chan []byte),
 	}
-	ws.run(url, headers)
+	ws.runAsClient(url, headers)
+	return ws
+}
+
+func UpgradeToWebSocket(w http.ResponseWriter, r *http.Request, userdata string, callbacks WebsocketCallbacks) WebsocketClient {
+	var upgrader = websocket.Upgrader{
+		ReadBufferSize:  8192,
+		WriteBufferSize: 8192,
+	}
+
+	log.Infof("upgrade: %s", userdata)
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("upgrade: %s", err.Error())
+		return nil
+	}
+
+	ws := &websocketImpl{
+		userData:    userdata,
+		callbacks:   callbacks,
+		running:     true,
+		runningLock: sync.RWMutex{},
+		conn:        conn,
+		sendChan:    make(chan []byte),
+	}
+
+	go ws.readGoroutine()
+	go ws.writeGoroutine()
+
 	return ws
 }
 
@@ -109,7 +137,7 @@ func (ws *websocketImpl) IsRunning() bool {
 	return ws.running
 }
 
-func (ws *websocketImpl) run(url string, headers http.Header) {
+func (ws *websocketImpl) runAsClient(url string, headers http.Header) {
 	// No time to untangle the cert mess.  Ignore it.  Ew.
 	dialer := *websocket.DefaultDialer
 	dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}

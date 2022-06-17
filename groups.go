@@ -10,8 +10,8 @@ import sonos "github.com/swmerc/sonosmqtt/sonos"
 //
 // Note that we have a TON of copies of the PlayerId for now (and perhaps always).  Oh well.
 type Group struct {
-	Coordinator *Player
-	Players     map[string]*Player
+	Coordinator Player
+	Players     map[string]Player
 }
 
 // getGroupMap parses a sonos.GroupsResponse and returns a map of all Groups indexed by PlayerId.
@@ -20,13 +20,13 @@ type Group struct {
 // data structtures.  I suppose I should make a proper type for the map[string]Group stuff at
 // some point.
 func getGroupMap(hhid string, groupsResponse sonos.GroupsResponse) (map[string]Group, error) {
-	var allPlayers map[string]*Player = make(map[string]*Player, 32)
+	var allPlayers map[string]Player = make(map[string]Player, 32)
 	var allGroups map[string]Group = make(map[string]Group, 32)
 
 	// Stash all of the players
 	for _, p := range groupsResponse.Players {
-		player := newInternalPlayerFromSonosPlayer(p, hhid, "") // We don't know GroupId yet
-		allPlayers[player.PlayerId] = player
+		player := NewInternalPlayerFromSonosPlayer(p, hhid, "") // We don't know GroupId yet
+		allPlayers[player.GetId()] = player
 	}
 
 	// Process the groups and create them from the players
@@ -36,14 +36,13 @@ func getGroupMap(hhid string, groupsResponse sonos.GroupsResponse) (map[string]G
 			// We now know groupId.  This is good because we need it for the command headers later.
 			//
 			// I could likely pull this out of Player and toss it into Group when we subscribe to all groups?
-			coordinator.GroupId = group.Id
+			coordinator.SetCoordinator(coordinator, group.Id)
 
-			players := make(map[string]*Player, 32)
+			players := make(map[string]Player, 32)
 			for _, playerId := range group.PlayerIds {
 				if player, ok := allPlayers[playerId]; ok {
-					player.GroupId = group.Id
-					player.CoordinatorId = coordinator.PlayerId
-					players[player.PlayerId] = player
+					player.SetCoordinator(coordinator, group.Id)
+					players[player.GetId()] = player
 				}
 			}
 
@@ -51,7 +50,7 @@ func getGroupMap(hhid string, groupsResponse sonos.GroupsResponse) (map[string]G
 				Coordinator: coordinator,
 				Players:     players,
 			}
-			allGroups[coordinator.PlayerId] = newGroup
+			allGroups[coordinator.GetId()] = newGroup
 		}
 	}
 
@@ -96,11 +95,11 @@ func missingGroups(old, new map[string]Group) []string {
 
 	for id, origGroup := range old {
 		if newGroup, ok := new[id]; ok {
-			if newGroup.Coordinator.GroupId == origGroup.Coordinator.GroupId {
+			if newGroup.Coordinator.GetGroupId() == origGroup.Coordinator.GetGroupId() {
 				continue
 			}
 		}
-		missing = append(missing, origGroup.Coordinator.GroupId)
+		missing = append(missing, origGroup.Coordinator.GetGroupId())
 	}
 
 	return missing

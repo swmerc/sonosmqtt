@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/swmerc/sonosmqtt/sonos"
 )
 
 //
@@ -13,14 +15,14 @@ import (
 // Simplified version of groups.  The internal version is a map of groups containing maps of players, this
 // is just a coordinatorId and a slice of players in the group.
 type ExportedGroup struct {
-	CoordinatorId string    `json:"id"`
-	Players       []*Player `json:"players"`
+	CoordinatorId string   `json:"id"`
+	Players       []Player `json:"players"`
 }
 
 func exportedGroupFromGroup(group Group) ExportedGroup {
 	exported := ExportedGroup{
-		CoordinatorId: group.Coordinator.PlayerId,
-		Players:       make([]*Player, 0, 64),
+		CoordinatorId: group.Coordinator.GetId(),
+		Players:       make([]Player, 0, 64),
 	}
 
 	for _, player := range group.Players {
@@ -58,7 +60,7 @@ func (app *App) GetGroup(id string) ([]byte, error) {
 }
 
 func (app *App) GetPlayers() ([]byte, error) {
-	players := make([]*Player, 0, 64)
+	players := make([]Player, 0, 64)
 
 	app.groupsLock.RLock()
 	for _, group := range app.groups {
@@ -72,15 +74,16 @@ func (app *App) GetPlayers() ([]byte, error) {
 }
 
 func (app *App) GetPlayer(id string) ([]byte, error) {
-	player := &Player{}
+	var player Player = nil
 	ok := false
 
 	app.groupsLock.RLock()
 	for _, group := range app.groups {
 		player, ok = group.Players[id]
-		if ok {
+		if ok && player != nil {
 			break
 		}
+		ok = false
 	}
 	app.groupsLock.RUnlock()
 
@@ -91,16 +94,11 @@ func (app *App) GetPlayer(id string) ([]byte, error) {
 	return nil, fmt.Errorf("404")
 }
 
-var playerTargetedCommands = map[string]bool{
-	"settings":     true,
-	"playerVolume": true,
-}
+func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace string) (Player, string) {
 
-func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace string) (*Player, string) {
+	playerTargeted := sonos.IsPlayerTargetedCommand(namespace)
 
-	playerTargeted := playerTargetedCommands[namespace]
-
-	var player *Player = nil
+	var player Player = nil
 
 	for _, g := range *groupMap {
 		if p, ok := g.Players[id]; ok {
@@ -119,9 +117,9 @@ func getPlayerForNamespace(groupMap *map[string]Group, id string, namespace stri
 
 	path := ""
 	if playerTargeted {
-		path = fmt.Sprintf("/players/%s", player.PlayerId)
+		path = fmt.Sprintf("/players/%s", player.GetId())
 	} else {
-		path = fmt.Sprintf("/groups/%s", player.GroupId)
+		path = fmt.Sprintf("/groups/%s", player.GetGroupId())
 	}
 
 	return player, path
@@ -170,7 +168,7 @@ func (app *App) CommandOverWebsocket(id string, namespace string, command string
 	}
 
 	// Form a message and fire it down the websocket
-	if err := app.SendMessageToPlayer(player, namespace, command); err != nil {
+	if err := player.SendCommandViaWebsocket(namespace, command); err != nil {
 		return nil, fmt.Errorf("500: %s", err.Error())
 	}
 
@@ -178,3 +176,34 @@ func (app *App) CommandOverWebsocket(id string, namespace string, command string
 	// commands can be mapped to REST.
 	return []byte(""), nil
 }
+
+func (app *App) WebsocketToREST(msg sonos.WebsocketRequest) []byte {
+	headers := &msg.Headers
+
+	bytesFromPlayer, err := app.PostDataREST(headers.PlayerId, headers.Namespace, headers.Command, msg.BodyJSON)
+
+	// FIXME: We want to return the same headers the Sonos player does for a websocket request.  Guess
+	//        I need to figure out what those are.
+	response := sonos.WebsocketResponse{
+		Headers: sonos.ResponseHeaders{
+			CommonHeaders: msg.Headers.CommonHeaders,
+		},
+		BodyJSON: bytesFromPlayer,
+	}
+
+	if err == nil {
+		response.Headers.Success = true
+		response.Headers.Type = "ummmmm"
+	} else {
+		response.Headers.Success = true
+		response.Headers.Type = "globalError"
+	}
+
+	body, _ := response.ToRawBytes()
+	return body
+}
+
+// CODEME: I need to be able to pass websocket messages through to the player's websocket so I don't need to
+//         do any translation.  The only hard part is stashing a callback to deal with the response, which
+//         in turn requires a timeout mechanism and a way to respond to all waiters with "nope, the websocket bounced"
+//         if things bounce.  Sounds like fun.

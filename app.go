@@ -29,7 +29,7 @@ const (
 
 type SonosResponseWithId struct {
 	playerId string
-	sonos.Response
+	sonos.WebsocketResponse
 }
 
 type ErrorWithId struct {
@@ -111,7 +111,7 @@ func (app *App) run() {
 
 				log.Infof("found: %s", player.String())
 				if response, err = app.getGroupsRest(player); err == nil {
-					if app.groupUpdate, err = getGroupMap(player.HouseholdId, response); err == nil {
+					if app.groupUpdate, err = getGroupMap(player.GetHouseholdId(), response); err == nil {
 						app.currentState = CreateWebsockets
 					}
 				}
@@ -123,12 +123,11 @@ func (app *App) run() {
 			}
 
 		case CreateWebsockets:
-			// Close the old websockets
+			// Close the old websockets.
+			// CODEME: I need an easier way to iterate over all players
 			for _, group := range app.groups {
-				if group.Coordinator.Websocket != nil {
-					log.Infof("app: closing websocket for %s", group.Coordinator.PlayerId)
-					group.Coordinator.Websocket.Close()
-					group.Coordinator.Websocket = nil
+				for _, player := range group.Players {
+					player.CloseWebsocketConnection()
 				}
 			}
 
@@ -155,31 +154,33 @@ func (app *App) run() {
 
 			first := true
 
+			// CODEME: I need an easier way to iterate over all players
 			for _, group := range app.groups {
-				player := group.Coordinator
-				log.Infof("app: connecting to %s, AKA %s", player.Name, player.PlayerId)
-				player.Websocket = NewWebSocket(player.WebsocketUrl, player.PlayerId, httpHeaders, app)
+				for _, player := range group.Players {
 
-				if player.Websocket == nil {
-					log.Errorf("app: Unable to open websocket")
-					continue
-				}
+					if err := player.InitWebsocketConnection(httpHeaders, app); err != nil {
+						log.Errorf("app: Unable to open websocket for %s: %s", player.GetId(), err.Error())
+						continue
+					}
 
-				// Only subscribe to groups on one player
-				if first {
-					first = false
-					app.groupsSource = player.PlayerId
-					app.SendMessageToPlayer(player, "groups", "subscribe")
-				}
+					// Only subscribe to groups on one player.  It does not need to be a coordinator
+					if first {
+						first = false
+						app.groupsSource = player.GetId()
+						player.SendCommandViaWebsocket("groups", "subscribe")
+					}
 
-				// Subscribe to the list of namespaces provided in the config file on
-				// all GCs (for now).  We probably want lists for:
-				//
-				// 1) Global stuff (in the first section above)
-				// 2) Stuff for all GCs
-				// 3) Stuff for all players (networking status, whatever)
-				for _, namespace := range app.config.Sonos.Subscriptions {
-					app.SendMessageToPlayer(player, namespace, "subscribe")
+					// Subscribe to the list of namespaces provided in the config file on
+					// all group coordinators.  We probably want lists for:
+					//
+					// 1) Global stuff (in the first section above)
+					// 2) Stuff for all group coordinators
+					// 3) Stuff for all players (networking status, whatever)
+					if group.Coordinator.GetId() == player.GetId() {
+						for _, namespace := range app.config.Sonos.Subscriptions.Group {
+							player.SendCommandViaWebsocket(namespace, "subscribe")
+						}
+					}
 				}
 			}
 
@@ -239,10 +240,10 @@ func (app *App) handleResponse(msg SonosResponseWithId) {
 		}
 
 		player := group.Coordinator
-		log.Infof("app: groups event: player=%s", player.Name)
+		log.Infof("app: groups event: player=%s", player.GetName())
 
 		// If the list of groups is different, kick the main state machine so we can connect to all of the correct players
-		if groups, err := getGroupMap(player.HouseholdId, groupsResponse); err == nil {
+		if groups, err := getGroupMap(player.GetHouseholdId(), groupsResponse); err == nil {
 			if !groupsAreCloseEnoughForMe(app.groups, groups) {
 				// This line is insanely slow...
 				app.RemoveStaleTopics(missingPlayers(app.groups, groups), missingGroups(app.groups, groups))
@@ -321,11 +322,11 @@ func (app *App) PublishEventToAllTopics(group Group, msg *SonosResponseWithId) {
 		hhPath := fmt.Sprintf("%s/%s", app.config.MQTT.Topic, msg.Headers.Type)
 		app.PublishEventToTopic(hhPath, msg.BodyJSON)
 	} else {
-		groupPath := fmt.Sprintf("%s/group/%s/%s", app.config.MQTT.Topic, group.Coordinator.PlayerId, msg.Headers.Type)
+		groupPath := fmt.Sprintf("%s/group/%s/%s", app.config.MQTT.Topic, group.Coordinator.GetId(), msg.Headers.Type)
 		app.PublishEventToTopic(groupPath, msg.BodyJSON)
 		if app.config.Sonos.FanOut {
 			for _, player := range group.Players {
-				playerPath := fmt.Sprintf("%s/player/%s/%s", app.config.MQTT.Topic, player.PlayerId, msg.Headers.Type)
+				playerPath := fmt.Sprintf("%s/player/%s/%s", app.config.MQTT.Topic, player.GetId(), msg.Headers.Type)
 				app.PublishEventToTopic(playerPath, msg.BodyJSON)
 			}
 		}
@@ -378,12 +379,6 @@ func (app *App) RemoveStaleTopics(players []string, groups []string) {
 // All of On* callbacks are run in the websocket's goroutines
 //
 
-// OnConnect is called when a websocket connection is established. This is run in
-// a goroutine owned by the websocket.
-func (app *App) OnConnect(id string) {
-	log.Infof("app: connected to %s", id)
-}
-
 // OnError is called when a websocket error has occurred.  This is run in a goroutine
 // owned by the websocket.
 func (app *App) OnError(id string, err error) {
@@ -395,57 +390,29 @@ func (app *App) OnError(id string, err error) {
 
 // OnMessage is called when a message is received from a websocket.  This is run in
 // a goroutine owned by the websocket.
-func (app *App) OnMessage(id string, data []byte) {
+func (app *App) OnEvent(id string, data []byte) {
+
 	// Parse the response
-	var sonosResponse sonos.Response
+	var sonosResponse sonos.WebsocketResponse
 	if err := sonosResponse.FromRawBytes(data); err != nil {
 		log.Errorf("app: unable to parse: %s (%s)", err.Error(), string(data))
 	}
 
-	app.responseChannel <- SonosResponseWithId{
-		playerId: id,
-		Response: sonosResponse,
+	if len(sonosResponse.Headers.CmdId) > 0 {
+		log.Infof("app: msg: %s: %s", id, string(data))
 	}
-}
 
-// OnClose is called when a websocket connection is closed.  This is run in a goroutine
-// owned by the websocket.
-func (app *App) OnClose(id string) {
-	log.Infof("app: connection lost: %s", id)
+	app.responseChannel <- SonosResponseWithId{
+		playerId:          id,
+		WebsocketResponse: sonosResponse,
+	}
 }
 
 //
 // Player stuff
 //
-func (app *App) SendMessageToPlayer(player *Player, namespace string, command string) error {
-	cmdId := player.CmdId
-	player.CmdId = player.CmdId + 1
 
-	headers := &sonos.Headers{
-		Namespace:   namespace,
-		Command:     command,
-		HouseholdId: player.HouseholdId,
-		PlayerId:    player.PlayerId,
-		GroupId:     player.GroupId,
-		CmdId:       fmt.Sprintf("%d", cmdId),
-	}
-
-	headersJSON, err := json.Marshal(headers)
-	if err != nil {
-		return err
-	}
-
-	//
-	// NOTE: If we are going to rate limit, this is where it should happen.  It adds a pile of complexity,
-	//       however, and we're not sending a ton of commands.
-	//
-	msg := fmt.Sprintf("[%s,{}]", headersJSON)
-	log.Infof("app: outgoing: %s", msg)
-
-	return player.Websocket.SendMessage([]byte(msg))
-}
-
-func (app *App) discoverPlayer() *Player {
+func (app *App) discoverPlayer() Player {
 	//
 	// Iterate over the mDNS responses and fill in a list of all players.  It turns out that we only
 	// need a single player in the correct HH to respond, so we may be able to do this as the mDNS
@@ -491,7 +458,7 @@ func (app *App) discoverPlayer() *Player {
 			log.Errorf("Unable to parse response from /info")
 		}
 
-		return newInternalPlayerFromInfoResponse(info)
+		return NewInternalPlayerFromInfoResponse(info)
 	}
 
 	// Did not find anything at all.  Weeee.
@@ -503,7 +470,7 @@ func (app *App) discoverPlayer() *Player {
 // player, get the groups via that, close it, and open a websocket on the
 // final player but it seems silly.  We need REST for GetInfo anyway.
 //
-func (app *App) getGroupsRest(p *Player) (sonos.GroupsResponse, error) {
+func (app *App) getGroupsRest(p Player) (sonos.GroupsResponse, error) {
 	raw, err := app.playerDoGET(p, "/groups")
 
 	if err != nil {
@@ -533,11 +500,10 @@ func (a *App) doRESTWithApiKey(fullUrl string, method string, body []byte) ([]by
 	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	client := &http.Client{Transport: customTransport}
 
-	log.Infof("REST: %s URL=%s", method, fullUrl)
+	log.Debugf("REST: %s URL=%s", method, fullUrl)
 
 	request, err := http.NewRequest(method, fullUrl, bytes.NewBuffer(body))
 	if err != nil {
-		log.Errorf("REST: NewRequest: %s", err.Error())
 		return nil, err
 	}
 	a.addApiKey(&request.Header)
@@ -563,12 +529,12 @@ func (a *App) doRESTWithApiKey(fullUrl string, method string, body []byte) ([]by
 	return data, nil
 }
 
-func (a *App) playerDoGET(p *Player, path string) ([]byte, error) {
-	return a.doRESTWithApiKey(p.createFullRESTUrl(path), http.MethodGet, nil)
+func (a *App) playerDoGET(p Player, path string) ([]byte, error) {
+	return a.doRESTWithApiKey(p.CreateFullRESTUrl(path), http.MethodGet, nil)
 }
 
-func (a *App) playerDoPOST(p *Player, path string, body []byte) ([]byte, error) {
-	return a.doRESTWithApiKey(p.createFullRESTUrl(path), http.MethodPost, body)
+func (a *App) playerDoPOST(p Player, path string, body []byte) ([]byte, error) {
+	return a.doRESTWithApiKey(p.CreateFullRESTUrl(path), http.MethodPost, body)
 }
 
 //
@@ -576,14 +542,14 @@ func (a *App) playerDoPOST(p *Player, path string, body []byte) ([]byte, error) 
 //
 func getPlayersJSONFromGroupMap(groups map[string]Group) ([]byte, error) {
 	// Convert to an array since the map is useless to the end users.  Ew.
-	var playerArray []*Player = make([]*Player, 0, 64)
+	var playerArray []Player = make([]Player, 0, 64)
 	for _, g := range groups {
 		for _, p := range g.Players {
 			playerArray = append(playerArray, p)
 		}
 	}
 
-	// Send it out
+	// Send it out.  Does this even work?
 	bytes, err := json.Marshal(playerArray)
 	return bytes, err
 }

@@ -12,7 +12,7 @@ import (
 // simpler type suitable for a dumb device.
 func simplifySonosType(msg *SonosResponseWithId) bool {
 	if f, ok := simplfiers[msg.Headers.Type]; ok {
-		if body, err := f(msg.Response.BodyJSON); err == nil {
+		if body, err := f(msg.WebsocketResponse.BodyJSON); err == nil {
 			msg.Headers.Type = msg.Headers.Type + "Simple"
 			msg.BodyJSON = body
 			return true

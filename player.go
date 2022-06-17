@@ -2,12 +2,40 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 
+	log "github.com/sirupsen/logrus"
 	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
-type Player struct {
+type PlayerEventHandler interface {
+	OnEvent(playerId string, data []byte)
+	OnError(playerId string, err error)
+}
+
+type Player interface {
+	GetId() string
+
+	GetHouseholdId() string
+	GetGroupId() string
+	GetName() string
+
+	String() string
+
+	SetCoordinator(coordinator Player, groupId string)
+
+	// Temporary until we get real REST support
+	CreateFullRESTUrl(subpath string) string
+
+	// Websockets
+	InitWebsocketConnection(headers http.Header, eventHandler PlayerEventHandler) error
+	CloseWebsocketConnection()
+	SendCommandViaWebsocket(namespace string, command string) error
+}
+
+type playerImpl struct {
 	// Stuff from /info or /groups.  Not quite static, but we'll regenerate if GroupId changes so this is
 	// all static enough for our purposes.
 	//
@@ -19,16 +47,55 @@ type Player struct {
 	// to do group things.
 	PlayerId      string `json:"id"`
 	Name          string `json:"name"`
-	GroupId       string `json:"-"`
-	CoordinatorId string `json:"-"`
-	HouseholdId   string `json:"-"`
-	RestUrl       string `json:"-"`
-	WebsocketUrl  string `json:"-"`
+	groupId       string
+	coordinatorId string
+	householdId   string
+	restUrl       string
+	websocketUrl  string
 
-	CmdId int32 `json:"-"`
+	// websocket to the player.  All players we are tracking will have one.
+	sync.RWMutex
+	websocket    WebsocketClient
+	eventHandler PlayerEventHandler
+	cmdId        int32
+}
 
-	// Websocket to the player.  All players we are tracking will have one.
-	Websocket WebsocketClient `json:"-"`
+//
+// Functions to generate all of the data we need to talk to a player from a couple of sources.  I suppose
+// I could just use one of the existing structs from Sonos responses and add in what I need.
+//
+
+// NewInternalPlayerFromInfoResponse takes the data returned from /info and turns it into
+// our internal format.  Stuff not included is generated.
+func NewInternalPlayerFromInfoResponse(info sonos.PlayerInfoResponse) Player {
+	return &playerImpl{
+		Name:          info.Device.Name,
+		PlayerId:      info.PlayerId,
+		groupId:       info.GroupId,
+		coordinatorId: groupIdToCoordinatorId(info.GroupId),
+		householdId:   info.HouseholdId,
+		restUrl:       info.RestUrl,
+		websocketUrl:  info.WebsocketUrl,
+		cmdId:         1,
+		websocket:     nil,
+	}
+}
+
+// NewInternalPlayerFromSonos takes the player data returned in things like GroupsResponse and
+// turns it into our internal format.  No, this is not the same data we get from /info, or at
+// least it was not at some point.  The RestUrl may be included now.
+func NewInternalPlayerFromSonosPlayer(player sonos.Player, householdId string, groupId string) Player {
+	return &playerImpl{
+		Name:          player.Name,
+		PlayerId:      player.Id,
+		groupId:       groupId,
+		coordinatorId: groupIdToCoordinatorId(groupId),
+		householdId:   householdId,
+		restUrl:       restUrlFromWebsocketUrl(player.WebsocketUrl),
+		websocketUrl:  player.WebsocketUrl,
+		cmdId:         1,
+		websocket:     nil,
+	}
 }
 
 //
@@ -50,50 +117,166 @@ func restUrlFromWebsocketUrl(websocketUrl string) string {
 }
 
 //
-// Functions to generate all of the data we need to talk to a player from a couple of sources.  I suppose
-// I could just use one of the existing structs from Sonos responses and add in what I need.
+// Stuff to support the interface
 //
 
-// newInternalPlayerFromInfoResponse takes the data returned from /info and turns it into
-// our internal format.  Stuff not included is generated.
-func newInternalPlayerFromInfoResponse(info sonos.PlayerInfoResponse) *Player {
-	return &Player{
-		Name:          info.Device.Name,
-		PlayerId:      info.PlayerId,
-		GroupId:       info.GroupId,
-		CoordinatorId: groupIdToCoordinatorId(info.GroupId),
-		HouseholdId:   info.HouseholdId,
-		RestUrl:       info.RestUrl,
-		WebsocketUrl:  info.WebsocketUrl,
-		CmdId:         1,
-		Websocket:     nil,
-	}
+func (p *playerImpl) GetId() string {
+	return p.PlayerId
 }
 
-// newInternalPlayerFromSonos takes the player data returned in things like GroupsResponse and
-// turns it into our internal format.  No, this is not the same data we get from /info, or at
-// least it was not at some point.  The RestUrl may be included now.
-func newInternalPlayerFromSonosPlayer(player sonos.Player, householdId string, groupId string) *Player {
-	return &Player{
-		Name:          player.Name,
-		PlayerId:      player.Id,
-		GroupId:       groupId,
-		CoordinatorId: groupIdToCoordinatorId(groupId),
-		HouseholdId:   householdId,
-		RestUrl:       restUrlFromWebsocketUrl(player.WebsocketUrl),
-		WebsocketUrl:  player.WebsocketUrl,
-		CmdId:         1,
-		Websocket:     nil,
-	}
+func (p *playerImpl) GetName() string {
+	return p.Name
 }
 
-func (p *Player) createFullRESTUrl(subpath string) string {
+func (p *playerImpl) GetHouseholdId() string {
+	return p.householdId
+}
+
+func (p *playerImpl) GetGroupId() string {
+	return p.groupId
+}
+
+func (p *playerImpl) String() string {
+	return fmt.Sprintf("name=%s, id=%s, groupid=%s, wsurl=%s, resturl=%s", p.Name, p.PlayerId, p.groupId, p.websocketUrl, p.restUrl)
+}
+
+func (p *playerImpl) CreateFullRESTUrl(subpath string) string {
 	// Yup, we assume V1 and local HH.  No idea why the LAN variant has multi HH support when the
 	// players do not.  Unless it is to match the cloud API, but the "local" bit makes it not match
 	// anyway.
-	return fmt.Sprintf("%s/v1/households/local%s", p.RestUrl, subpath)
+	//
+	// NOTE: We should move the code that talks to players in here and hide all of the Urls
+	return fmt.Sprintf("%s/v1/households/local%s", p.restUrl, subpath)
 }
 
-func (p *Player) String() string {
-	return fmt.Sprintf("name=%s, id=%s, groupid=%s, wsurl=%s, resturl=%s", p.Name, p.PlayerId, p.GroupId, p.WebsocketUrl, p.RestUrl)
+func (p *playerImpl) SetCoordinator(coordinator Player, groupId string) {
+	p.coordinatorId = coordinator.GetId()
+	p.groupId = groupId
+}
+
+//
+// Player websockets.  This will likely get split out.
+//
+
+func (p *playerImpl) InitWebsocketConnection(headers http.Header, eventHandler PlayerEventHandler) error {
+	// We only ever create websockets on one thread, but we currently remove them in OnClose() below
+	// so we need locking.  Weee.
+	p.RLock()
+	if p.websocket != nil {
+		p.RUnlock()
+		return nil
+	}
+	p.RUnlock()
+
+	// We point the callbacks to this object, which passes along things of interest to the
+	// event handler (which only contains events).  We'll likely have to add a Close handler
+	// so we can reach to players going away.
+	ws := NewClientWebSocket(p.websocketUrl, p.PlayerId, headers, p)
+
+	if ws != nil {
+		p.Lock()
+		p.eventHandler = eventHandler
+		p.websocket = ws
+		p.Unlock()
+	}
+
+	if ws == nil {
+		return fmt.Errorf("unable to create websocket for %s", p.PlayerId)
+	}
+
+	return nil
+}
+
+func (p *playerImpl) CloseWebsocketConnection() {
+	p.Lock()
+	defer p.Unlock()
+
+	if p.eventHandler != nil {
+		p.eventHandler = nil
+	}
+
+	if p.websocket != nil {
+		p.websocket.Close()
+	}
+}
+
+func (p *playerImpl) SendCommandViaWebsocket(namespace string, command string) error {
+	// Lock for the bits that touch cmdId and grab a reference
+	p.Lock()
+
+	// Grab a reference to the websocket.  We're sending this no matter what
+	ws := p.websocket
+	if ws == nil {
+		p.Unlock()
+		return fmt.Errorf("player: %s: attempt to send with no websocket", p.PlayerId)
+	}
+
+	request := &sonos.WebsocketRequest{
+		Headers: sonos.RequestHeaders{
+			CommonHeaders: sonos.CommonHeaders{
+				Namespace:   namespace,
+				Command:     command,
+				UserId:      "",
+				HouseholdId: p.householdId,
+				GroupId:     p.groupId,
+				PlayerId:    p.PlayerId,
+				CmdId:       fmt.Sprintf("%d", p.cmdId),
+				Topic:       "",
+			},
+		},
+		BodyJSON: []byte{},
+	}
+
+	p.cmdId = p.cmdId + 1
+
+	p.Unlock()
+
+	// Might as well convert to JSON, log, and send outside of the lock
+	msg, err := request.ToRawBytes()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("player: ws: outgoing: %s", string(msg))
+
+	return ws.SendMessage(msg)
+}
+
+//
+// WebsocketCallbacks interface so we can get callbacks here.
+//
+
+func (p *playerImpl) OnConnect(userData string) {
+	log.Infof("player: %s: connected", p.PlayerId)
+}
+
+func (p *playerImpl) OnError(userData string, err error) {
+	p.RLock()
+	eventHandler := p.eventHandler
+	p.RUnlock()
+
+	log.Infof("player: %s: error: %s", p.PlayerId, err.Error())
+	if eventHandler != nil {
+		eventHandler.OnError(userData, err)
+	}
+}
+
+func (p *playerImpl) OnClose(userData string) {
+	p.Lock()
+	defer p.Unlock()
+
+	p.websocket = nil
+	p.eventHandler = nil
+}
+
+func (p *playerImpl) OnMessage(userData string, msg []byte) {
+	p.RLock()
+	eventHandler := p.eventHandler
+	p.RUnlock()
+
+	// CODEME: All go to the event handler for now, but we only want actual events to
+	//         go at some point.
+	if eventHandler != nil {
+		eventHandler.OnEvent(userData, msg)
+	}
 }
