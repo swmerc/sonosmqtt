@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,11 +25,11 @@ type WebDataInterface interface {
 	GetDataREST(id string, namespace string, command string) ([]byte, error)
 	PostDataREST(id string, namespace string, command string, body []byte) ([]byte, error)
 
-	// Function that converts websocket request to REST request.  VERY limited at the moment.
-	WebsocketToREST(msg sonos.WebsocketRequest) []byte
-
 	// Debug hackery to send a command over a websocket.
-	CommandOverWebsocket(id string, namespace string, command string) ([]byte, error)
+	CommandOverWebsocket(id string, namespace string, command string, callback func(sonos.WebsocketResponse)) error
+
+	// Real function to send data over a websocket and await a response
+	RequestOverWebsocket(request sonos.WebsocketRequest, callback func(sonos.WebsocketResponse))
 }
 
 type websocketUser struct {
@@ -38,6 +37,11 @@ type websocketUser struct {
 	ws   WebsocketClient
 	mqtt mqtt.Client
 	data WebDataInterface
+
+	// Lock when accessing the above.  It is safe to take a reference of
+	// ws and mqtt under the lock and use it later, but they may become nil
+	// at any point so you do want to make sure it is still valid
+	sync.Mutex
 }
 
 type websocketUsers struct {
@@ -103,8 +107,19 @@ func StartWebServer(port int, data WebDataInterface) {
 		}).Methods(http.MethodPost)
 
 		router.HandleFunc("/api/v1/wstest/{id}/{namespace}/{command}", func(w http.ResponseWriter, r *http.Request) {
-			bytes, err := data.CommandOverWebsocket(mux.Vars(r)["id"], mux.Vars(r)["namespace"], mux.Vars(r)["command"])
-			writeResponse(w, &bytes, err)
+			var responseChan chan sonos.WebsocketResponse
+			err := data.CommandOverWebsocket(mux.Vars(r)["id"],
+				mux.Vars(r)["namespace"],
+				mux.Vars(r)["command"],
+				func(resp sonos.WebsocketResponse) {
+					responseChan <- resp
+				})
+			if err != nil {
+				writeResponse(w, &[]byte{}, err)
+			}
+			response := <-responseChan
+			raw, err := response.ToRawBytes()
+			writeResponse(w, &raw, err)
 		}).Methods(http.MethodPost)
 
 		//
@@ -142,10 +157,11 @@ func handleWebsocketUpgrade(w http.ResponseWriter, r *http.Request, data WebData
 	hash := r.RemoteAddr
 
 	user := websocketUser{
-		hash: hash,
-		ws:   nil,
-		mqtt: nil,
-		data: data,
+		hash:  hash,
+		ws:    nil,
+		mqtt:  nil,
+		data:  data,
+		Mutex: sync.Mutex{},
 	}
 
 	ws := UpgradeToWebSocket(w, r, hash, &user)
@@ -163,16 +179,33 @@ func handleWebsocketUpgrade(w http.ResponseWriter, r *http.Request, data WebData
 
 func (user *websocketUser) OnConnect(userdata string) {
 	log.Infof("wsserver: connect: %s", userdata)
+
+	client, err := initMQTTClient(false)
+	if err != nil {
+		log.Errorf("wsserver: can't connect to MQTT: %s", err.Error())
+		return
+	}
+
+	user.Lock()
+	user.mqtt = client
+	user.Unlock()
 }
 
 func (user *websocketUser) OnClose(userdata string) {
 	log.Infof("wsserver: close: %s", userdata)
 
-	// Kill the MQTT client
+	// Kill the MQTT client and make sure we remove references to the
+	// MQTT client and websocket
+	user.Lock()
 
-	// Make sure we remove reference to the MQTT client and websocket
+	if user.mqtt != nil {
+		user.mqtt.Disconnect(0)
+	}
 	user.mqtt = nil
 	user.ws = nil
+	user.data = nil
+
+	user.Unlock()
 
 	// Delete the user from the map, which should garbage collect it
 	users.mutex.Lock()
@@ -185,51 +218,91 @@ func (user *websocketUser) OnError(userdata string, err error) {
 }
 
 func (user *websocketUser) OnMessage(userdata string, bytes []byte) {
-	log.Infof("wsserver: message: %s: %s", userdata, string(bytes))
+	log.Debugf("wsserver: message: %s: %s", userdata, string(bytes))
 
-	msg := sonos.WebsocketRequest{}
-	if err := msg.FromRawBytes(bytes); err != nil {
+	// Parse the request
+	request := sonos.WebsocketRequest{}
+	if err := request.FromRawBytes(bytes); err != nil {
 		// FIXME: Return a global error here?
 		log.Errorf("wsserver: msg error: %s", err.Error())
 		user.ws.SendMessage([]byte(err.Error()))
 		return
 	}
 
+	// Grab a reference to the websocket under the lock
+	user.Lock()
+	wsClient := user.ws
+	user.Unlock()
+
 	// Pull out subscribes and use the MQTT client to subscribe.  This is the point
 	// where I wish I had stashed the namespace in the MQTT topic, but screw it.  All
 	// MQTT events can be a clean slate.
-	if msg.Headers.Command == "subscribe" {
-		log.Info("subscribe: %s", msg.Headers.Topic)
+	//
+	// FIXME: Move the MQTT handling to a new function, clean up error paths (emulating
+	//        what players actually send), etc
+	if request.Headers.Command == "subscribe" {
+		log.Info("subscribe: %s", request.Headers.Topic)
 
-		// Do we even have a client?
+		success := true
 		if user.mqtt == nil {
-			var err error = nil
-			if user.mqtt, err = initMQTTClient(false); err != nil {
-				user.mqtt = nil
-				user.ws.SendMessage([]byte(err.Error())) // KLUDGE: return globalError here!
-				return
-			}
-
+			success = false
 		}
-		log.Infof("wsserver: good topic, and haz client: %s", msg.Headers.Topic)
-		user.mqtt.Subscribe(msg.Headers.Topic, 0, func(client mqtt.Client, msg mqtt.Message) {
-			if user.ws != nil {
-				user.ws.SendMessage(msg.Payload())
-			}
-		})
+
+		log.Infof("wsserver: good topic, and haz client: %s", request.Headers.Topic)
+		response := sonos.WebsocketResponse{
+			Headers: sonos.ResponseHeaders{
+				CommonHeaders: sonos.CommonHeaders{
+					Command: "subscribe",
+					CmdId:   request.Headers.CmdId,
+					Topic:   request.Headers.Topic,
+				},
+				Success: success,
+				Type:    "none",
+			},
+			BodyJSON: []byte{},
+		}
+
+		body, err := response.ToRawBytes()
+		if err != nil {
+			log.Errorf("wsserver: can't convert response to JSON: %s", err.Error())
+		} else {
+			user.ws.SendMessage(body)
+		}
+
+		if success {
+			user.mqtt.Subscribe(request.Headers.Topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+				if wsClient != nil {
+					event := sonos.WebsocketResponse{
+						Headers: sonos.ResponseHeaders{
+							CommonHeaders: sonos.CommonHeaders{
+								Topic: msg.Topic(),
+							},
+						},
+						BodyJSON: []byte(msg.Payload()),
+					}
+
+					body, err := event.ToRawBytes()
+					if err != nil {
+						log.Errorf("wsserver: can't convert event to JSON: %s", err.Error())
+					} else {
+						wsClient.SendMessage(body)
+					}
+				}
+			})
+		}
 		return
 	}
 
 	// Send it along and reply when we get a response from the player
-	//
-	// NOTE: We currently do NOT support any command starting with get.  We can, but we need a
-	//       lookup table to map from websocket to REST.  Commands "just work" since they always
-	//       map directly to REST without having to know stuff only known at codegen time.
-	if strings.HasPrefix(msg.Headers.Command, "get") {
-		log.Infof("wsserver: NYI: %s:%s", msg.Headers.Namespace, msg.Headers.Command)
-	}
-
-	go func() {
-		user.ws.SendMessage(user.data.WebsocketToREST(msg))
-	}()
+	log.Info("OnMessage: sending: %v", request)
+	user.data.RequestOverWebsocket(request, func(response sonos.WebsocketResponse) {
+		response.Headers.CmdId = request.Headers.CmdId
+		log.Info("OnMessage: response: %v", response)
+		raw, err := response.ToRawBytes()
+		if err != nil {
+			log.Errorf("OnMessage: conversion failed: %s", err)
+		} else {
+			wsClient.SendMessage(raw)
+		}
+	})
 }

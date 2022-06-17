@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/swmerc/sonosmqtt/sonos"
 )
 
@@ -158,52 +159,36 @@ func (app *App) PostDataREST(id string, namespace string, command string, body [
 	return app.playerDoPOST(player, fmt.Sprintf("%s/%s/%s", path, namespace, command), body)
 }
 
-func (app *App) CommandOverWebsocket(id string, namespace string, command string) ([]byte, error) {
+func (app *App) CommandOverWebsocket(id string, namespace string, command string, callback func(sonos.WebsocketResponse)) error {
 	app.groupsLock.RLock()
 	player, _ := getPlayerForNamespace(&app.groups, id, namespace)
 	app.groupsLock.RUnlock()
 
 	if player == nil {
-		return nil, fmt.Errorf("404")
+		return fmt.Errorf("404")
 	}
 
 	// Form a message and fire it down the websocket
-	if err := player.SendCommandViaWebsocket(namespace, command); err != nil {
-		return nil, fmt.Errorf("500: %s", err.Error())
+	if err := player.SendCommandViaWebsocket(namespace, command, callback); err != nil {
+		return fmt.Errorf("500: %s", err.Error())
 	}
 
-	// Assume success, at least for now.   This is just a test to make sure I understand how websocket
-	// commands can be mapped to REST.
-	return []byte(""), nil
+	return nil
 }
 
-func (app *App) WebsocketToREST(msg sonos.WebsocketRequest) []byte {
-	headers := &msg.Headers
+func (app *App) RequestOverWebsocket(request sonos.WebsocketRequest, callback func(sonos.WebsocketResponse)) {
+	app.groupsLock.RLock()
+	player, _ := getPlayerForNamespace(&app.groups, request.Headers.PlayerId, request.Headers.Namespace)
+	app.groupsLock.RUnlock()
 
-	bytesFromPlayer, err := app.PostDataREST(headers.PlayerId, headers.Namespace, headers.Command, msg.BodyJSON)
-
-	// FIXME: We want to return the same headers the Sonos player does for a websocket request.  Guess
-	//        I need to figure out what those are.
-	response := sonos.WebsocketResponse{
-		Headers: sonos.ResponseHeaders{
-			CommonHeaders: msg.Headers.CommonHeaders,
-		},
-		BodyJSON: bytesFromPlayer,
+	if player == nil {
+		log.Errorf("unable to find player: %s", request.Headers.PlayerId)
+		return
 	}
 
-	if err == nil {
-		response.Headers.Success = true
-		response.Headers.Type = "ummmmm"
-	} else {
-		response.Headers.Success = true
-		response.Headers.Type = "globalError"
-	}
-
-	body, _ := response.ToRawBytes()
-	return body
+	request.Headers.HouseholdId = player.GetHouseholdId()
+	request.Headers.GroupId = player.GetGroupId()
+	player.SendRequestViaWebsocket(request, func(response sonos.WebsocketResponse) {
+		callback(response)
+	})
 }
-
-// CODEME: I need to be able to pass websocket messages through to the player's websocket so I don't need to
-//         do any translation.  The only hard part is stashing a callback to deal with the response, which
-//         in turn requires a timeout mechanism and a way to respond to all waiters with "nope, the websocket bounced"
-//         if things bounce.  Sounds like fun.

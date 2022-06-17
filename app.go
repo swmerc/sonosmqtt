@@ -167,7 +167,7 @@ func (app *App) run() {
 					if first {
 						first = false
 						app.groupsSource = player.GetId()
-						player.SendCommandViaWebsocket("groups", "subscribe")
+						player.SendCommandViaWebsocket("groups", "subscribe", nil)
 					}
 
 					// Subscribe to the list of namespaces provided in the config file on
@@ -178,7 +178,7 @@ func (app *App) run() {
 					// 3) Stuff for all players (networking status, whatever)
 					if group.Coordinator.GetId() == player.GetId() {
 						for _, namespace := range app.config.Sonos.Subscriptions.Group {
-							player.SendCommandViaWebsocket(namespace, "subscribe")
+							player.SendCommandViaWebsocket(namespace, "subscribe", nil)
 						}
 					}
 				}
@@ -390,21 +390,10 @@ func (app *App) OnError(id string, err error) {
 
 // OnMessage is called when a message is received from a websocket.  This is run in
 // a goroutine owned by the websocket.
-func (app *App) OnEvent(id string, data []byte) {
-
-	// Parse the response
-	var sonosResponse sonos.WebsocketResponse
-	if err := sonosResponse.FromRawBytes(data); err != nil {
-		log.Errorf("app: unable to parse: %s (%s)", err.Error(), string(data))
-	}
-
-	if len(sonosResponse.Headers.CmdId) > 0 {
-		log.Infof("app: msg: %s: %s", id, string(data))
-	}
-
+func (app *App) OnEvent(id string, response sonos.WebsocketResponse) {
 	app.responseChannel <- SonosResponseWithId{
 		playerId:          id,
-		WebsocketResponse: sonosResponse,
+		WebsocketResponse: response,
 	}
 }
 
