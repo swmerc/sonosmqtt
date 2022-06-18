@@ -27,7 +27,6 @@ func ScanForPlayersViaMDNS(scanTimeInSeconds uint) []MDNSData {
 
 	// This is moderately sketch, but should be safe.  The goroutine below writes to
 	// the slice and we don't read it until the browse operation completes.
-	log.Infof("mDNS: start scan")
 
 	devices := make([]MDNSData, 0, 32)
 	entryChannel := make(chan *zeroconf.ServiceEntry)

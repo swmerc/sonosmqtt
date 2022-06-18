@@ -23,9 +23,13 @@ type Config struct {
 		ApiKey      string `yaml:"apikey"`
 		HouseholdId string `yaml:"household"` // Filter to households with this if provided
 
-		// Things to subscribe to, and how to handle the data
-		Subscriptions []string `yaml:"subscriptions"`
-		Simplify      bool     `yaml:"simplify"`
+		// Things to subscribe to
+		Subscriptions struct {
+			Group []string `yaml:"group"`
+		} `yaml:"subscriptions"`
+
+		// Simplify makes some messages easier to parse
+		Simplify bool `yaml:"simplify"`
 
 		// Geekier stuff.  May go away.
 		ScanTime uint `yaml:"scantime"` // Time to wait for mDNS responses.  Defaults to 5 seconds.
@@ -66,7 +70,8 @@ func main() {
 	}
 
 	// MQTT client
-	if client, err = initMQTTClient(config.MQTT.Config); err != nil {
+	mqttConfig = &config.MQTT.Config
+	if client, err = initMQTTClient(true); err != nil {
 		log.Errorf("Unable to init MQTT client (%s)", err.Error())
 		return
 	}
@@ -129,8 +134,16 @@ type MQTTConfig struct {
 	Password string `yaml:"password"`
 }
 
+// Yup, I need a better way to do this
+var mqttConfig *MQTTConfig = nil
+
 // initMQTTClient actually initializes the client
-func initMQTTClient(config MQTTConfig) (mqtt.Client, error) {
+func initMQTTClient(block bool) (mqtt.Client, error) {
+	if mqttConfig == nil {
+		return nil, fmt.Errorf("MQTT: no config")
+	}
+	config := mqttConfig
+
 	if len(config.Host) == 0 || len(config.Client) == 0 || config.Port == 0 {
 		log.Infof("mqtt: not configured")
 		return nil, nil
@@ -171,16 +184,24 @@ func initMQTTClient(config MQTTConfig) (mqtt.Client, error) {
 	// misconfigured MQTT broker.
 	//
 	client := mqtt.NewClient(opts)
+	connected := false
+	var err error = nil
+
 	for {
 		if token := client.Connect(); token.Wait() && token.Error() != nil {
 			log.Infof("mqtt: error connecting to broker %s:%d at start: %s", config.Host, config.Port, token.Error())
 			time.Sleep(time.Duration(1) * time.Minute)
+			if block {
+				continue
+			}
+			err = fmt.Errorf("MQTT: unable to connect")
 		} else {
-			break
+			connected = true
 		}
+		break
 	}
 
-	log.Infof("mqtt: connected")
+	log.Infof("mqtt: connected: %t", connected)
 
-	return client, nil
+	return client, err
 }
