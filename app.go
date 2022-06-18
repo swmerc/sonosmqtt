@@ -28,9 +28,24 @@ const (
 	Searching
 	Polling
 	CreateWebsockets
-	Subscribe
 	Listen
 )
+
+func getStateName(state appState) string {
+	var names = map[appState]string{
+		Idle:             "Idle",
+		Searching:        "Searching",
+		Polling:          "Polling",
+		CreateWebsockets: "CreateWebsockets",
+		Listen:           "Listen",
+	}
+
+	if name, ok := names[state]; ok {
+		return name
+	}
+
+	return "Unknown"
+}
 
 type SonosResponseWithId struct {
 	playerId string
@@ -100,7 +115,7 @@ func (app *App) run() {
 	for {
 
 		if lastState != app.currentState {
-			log.Infof("app: state change: %d -> %d", lastState, app.currentState)
+			log.Infof("app: state change: %s -> %s", getStateName(lastState), getStateName(app.currentState))
 			lastState = app.currentState
 		}
 
@@ -114,7 +129,7 @@ func (app *App) run() {
 			if player := app.discoverPlayer(); player != nil {
 				var response sonos.GroupsResponse
 
-				log.Infof("found: %s", player.String())
+				log.Debugf("found: %s", player.String())
 				if response, err = app.getGroupsRest(player); err == nil {
 					if app.groupUpdate, err = getGroupMap(player.GetHouseholdId(), response); err == nil {
 						app.currentState = CreateWebsockets
@@ -415,7 +430,15 @@ func (app *App) discoverPlayer() Player {
 	// The loop is a bit funky since we currently can reject players if something goes wrong.  All errors
 	// are continues so we try the next player in the array
 	//
-	for _, mdnsDevice := range sonos.ScanForPlayersViaMDNS(app.config.Sonos.ScanTime) {
+	mdnsDevices := sonos.ScanForPlayersViaMDNS(app.config.Sonos.ScanTime)
+
+	for _, mdnsDevice := range mdnsDevices {
+		if info, err := mdnsDevice.GetInfoUrl(); err == nil {
+			log.Infof("app: found device: %s", info)
+		}
+	}
+
+	for _, mdnsDevice := range mdnsDevices {
 
 		hhid, err := mdnsDevice.GetHouseholdId()
 		if err != nil {
@@ -432,13 +455,13 @@ func (app *App) discoverPlayer() Player {
 			continue
 		}
 
+		// New player. Hit /info to get the player data, skipping devices with api v2
 		infoUrl, err := mdnsDevice.GetInfoUrl()
-		if err != nil {
+		if err != nil || strings.Contains(infoUrl, "api/v2") {
 			log.Errorf("app: GetInfoUrl: %s", err.Error())
 			continue
 		}
 
-		// New player. Hit /info to get the player data
 		body, err := app.doRESTWithApiKey(infoUrl, http.MethodGet, nil)
 		if err != nil {
 			log.Errorf("app: GetInfo: %s", err.Error())
