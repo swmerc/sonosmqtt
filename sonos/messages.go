@@ -157,9 +157,9 @@ func (msg *WebsocketResponse) FromRawBytes(data []byte) error {
 	}
 
 	// Check for success on commands
-	if msg.Headers.CmdId != "" && !msg.Headers.Success {
-		return fmt.Errorf("response is for a failed command: cmdId=%s", msg.Headers.CmdId)
-	}
+	// if msg.Headers.CmdId != "" && !msg.Headers.Success {
+	// 	return fmt.Errorf("response is for a failed command: cmdId=%s", msg.Headers.CmdId)
+	// }
 
 	return nil
 }

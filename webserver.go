@@ -114,12 +114,18 @@ func StartWebServer(port int, data WebDataInterface) {
 				func(resp sonos.WebsocketResponse) {
 					responseChan <- resp
 				})
+
+			// If it failed immediately the callback was not set up.
 			if err != nil {
 				writeResponse(w, &[]byte{}, err)
+				return
 			}
+
+			// If it did not fail immediately, it _will_ respond.
 			response := <-responseChan
 			raw, err := response.ToRawBytes()
 			writeResponse(w, &raw, err)
+
 		}).Methods(http.MethodPost)
 
 		//
@@ -241,7 +247,7 @@ func (user *websocketUser) OnMessage(userdata string, bytes []byte) {
 	// FIXME: Move the MQTT handling to a new function, clean up error paths (emulating
 	//        what players actually send), etc
 	if request.Headers.Command == "subscribe" {
-		log.Info("subscribe: %s", request.Headers.Topic)
+		log.Infof("subscribe: %s", request.Headers.Topic)
 
 		success := true
 		if user.mqtt == nil {
@@ -294,10 +300,10 @@ func (user *websocketUser) OnMessage(userdata string, bytes []byte) {
 	}
 
 	// Send it along and reply when we get a response from the player
-	log.Info("OnMessage: sending: %v", request)
+	log.Infof("OnMessage: sending: %v", request)
 	user.data.RequestOverWebsocket(request, func(response sonos.WebsocketResponse) {
 		response.Headers.CmdId = request.Headers.CmdId
-		log.Info("OnMessage: response: %v", response)
+		log.Infof("OnMessage: response: %v", response)
 		raw, err := response.ToRawBytes()
 		if err != nil {
 			log.Errorf("OnMessage: conversion failed: %s", err)

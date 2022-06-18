@@ -16,6 +16,11 @@ import (
 	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
+//
+// Unit test hooks
+//
+var websocketInitHook = NewClientWebSocket
+
 type appState int
 
 const (
@@ -118,7 +123,7 @@ func (app *App) run() {
 			}
 
 			if err != nil {
-				log.Errorf("Search error: ", err.Error())
+				log.Errorf("Search error: %s", err.Error())
 				time.Sleep(time.Second * 10)
 			}
 
@@ -414,7 +419,7 @@ func (app *App) discoverPlayer() Player {
 
 		hhid, err := mdnsDevice.GetHouseholdId()
 		if err != nil {
-			log.Errorf("app: %s", err.Error())
+			log.Errorf("app: GetHouseholdId: %s", err.Error())
 			continue
 		}
 
@@ -429,14 +434,14 @@ func (app *App) discoverPlayer() Player {
 
 		infoUrl, err := mdnsDevice.GetInfoUrl()
 		if err != nil {
-			log.Errorf("app: %s", err.Error())
+			log.Errorf("app: GetInfoUrl: %s", err.Error())
 			continue
 		}
 
 		// New player. Hit /info to get the player data
 		body, err := app.doRESTWithApiKey(infoUrl, http.MethodGet, nil)
 		if err != nil {
-			log.Errorf("app: %s", err.Error())
+			log.Errorf("app: GetInfo: %s", err.Error())
 			continue
 		}
 
@@ -506,7 +511,7 @@ func (a *App) doRESTWithApiKey(fullUrl string, method string, body []byte) ([]by
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		log.Errorf("REST: StatusCode: %d", response.StatusCode)
+		log.Errorf("REST: %s returned: %d", fullUrl, response.StatusCode)
 		return nil, fmt.Errorf("code: %d", response.StatusCode)
 	}
 

@@ -11,12 +11,24 @@ import (
 	sonos "github.com/swmerc/sonosmqtt/sonos"
 )
 
+//
+// Unit test hooks
+//
+var playerCmdTimeout = (10 * time.Second)
+
+// PlayerEventHandler supplies the set of callbacks that the Player uses when it gets messages or errors.
+// it is passed in when initializing the websocket interface since there is nothing to call back about
+// before then.
 type PlayerEventHandler interface {
 	OnEvent(playerId string, response sonos.WebsocketResponse)
 	OnError(playerId string, err error)
 }
 
+// Player is used to get information about a player in addition to sending it requests.  It is here to
+// hide the implemmentation so I can protect myself from ... myself.  It also allows for better unit
+// tests.  Probably.
 type Player interface {
+	// Static stuff that is fixed when the Player is created.
 	GetId() string
 
 	GetHouseholdId() string
@@ -25,12 +37,14 @@ type Player interface {
 
 	String() string
 
+	// Sigh.  We don't always know the coordinator.  We do know it before bringing up the
+	// websocket, however.
 	SetCoordinator(coordinator Player, groupId string)
 
 	// Temporary until we get real REST support
 	CreateFullRESTUrl(subpath string) string
 
-	// Websockets
+	// Websocket support
 	InitWebsocketConnection(headers http.Header, eventHandler PlayerEventHandler) error
 	CloseWebsocketConnection()
 	SendCommandViaWebsocket(namespace string, command string, completion func(sonos.WebsocketResponse)) error
@@ -186,7 +200,7 @@ func (p *playerImpl) InitWebsocketConnection(headers http.Header, eventHandler P
 	// We point the callbacks to this object, which passes along things of interest to the
 	// event handler (which only contains events).  We'll likely have to add a Close handler
 	// so we can reach to players going away.
-	ws := NewClientWebSocket(p.websocketUrl, p.PlayerId, headers, p)
+	ws := websocketInitHook(p.websocketUrl, p.PlayerId, headers, p)
 
 	if ws != nil {
 		p.Lock()
@@ -204,8 +218,8 @@ func (p *playerImpl) InitWebsocketConnection(headers http.Header, eventHandler P
 
 func (p *playerImpl) CloseWebsocketConnection() {
 	p.Lock()
-	defer p.Unlock()
 
+	// Remove the stuff we manage
 	if p.eventHandler != nil {
 		p.eventHandler = nil
 	}
@@ -213,35 +227,54 @@ func (p *playerImpl) CloseWebsocketConnection() {
 	if p.websocket != nil {
 		p.websocket.Close()
 	}
+
+	// Stop all of the timers and tell everyone that their command failed due to a websocket bounce
+	callbacks := make([]func(response sonos.WebsocketResponse), 0, len(p.cmdCallbackMap))
+	for _, cmdCallback := range p.cmdCallbackMap {
+		cmdCallback.timer.Stop()
+		callbacks = append(callbacks, cmdCallback.callback)
+	}
+
+	p.Unlock()
+
+	// Call all of the callbacks outside of the lock
+	response := sonos.WebsocketResponse{
+		Headers: sonos.ResponseHeaders{
+			CommonHeaders: sonos.CommonHeaders{},
+			Response:      "The websocket has ceased to be.  It is a former websocket.",
+			Success:       false,
+			Type:          "none",
+		},
+		BodyJSON: []byte{},
+	}
+
+	for _, callback := range callbacks {
+		callback(response)
+	}
 }
 
-func handleCmdTimeout(p *playerImpl, timer *time.Timer) {
+func handleCmdTimeout(p *playerImpl, cmdId string, timer *time.Timer) {
 	// Wait for the timeout.  We'll cancel when we get a response.  Probably.
 	<-timer.C
 
 	// Grab a reference to the websocket and delete the entry under the lock
 	p.Lock()
-	client := p.websocket
-	delete(p.cmdCallbackMap, fmt.Sprintf("%d", p.cmdId))
+	cmdCallback, ok := p.cmdCallbackMap[cmdId]
+	delete(p.cmdCallbackMap, cmdId)
 	p.Unlock()
 
-	if client != nil {
+	if ok && cmdCallback.callback != nil {
 		response := sonos.WebsocketResponse{
 			Headers: sonos.ResponseHeaders{
 				CommonHeaders: sonos.CommonHeaders{},
-				Response:      "Timed out",
+				Response:      "Command timed out",
 				Success:       false,
 				Type:          "none",
 			},
 			BodyJSON: []byte{},
 		}
 
-		body, err := response.ToRawBytes()
-		if err != nil {
-			log.Errorf("player: cmd timed out, but can't form response: %s", err.Error())
-		} else {
-			client.SendMessage(body)
-		}
+		cmdCallback.callback(response)
 	}
 }
 
@@ -256,14 +289,14 @@ func (p *playerImpl) SendRequestViaWebsocket(request sonos.WebsocketRequest, cal
 
 	// Set up a timeout function
 	if callback != nil {
-		timer := time.NewTimer(10 * time.Second)
+		timer := time.NewTimer(playerCmdTimeout)
 
 		p.cmdCallbackMap[fmt.Sprintf("%d", p.cmdId)] = cmdCallback{
 			callback: callback,
 			timer:    timer,
 		}
 
-		go handleCmdTimeout(p, timer)
+		go handleCmdTimeout(p, fmt.Sprintf("%d", p.cmdId), timer)
 	}
 
 	// Set and increment CmdId
@@ -280,8 +313,6 @@ func (p *playerImpl) SendRequestViaWebsocket(request sonos.WebsocketRequest, cal
 		log.Errorf("player: send failed: %s", err.Error())
 		return nil
 	}
-
-	log.Infof("player: ws: outgoing: %s", string(msg))
 
 	if err = ws.SendMessage(msg); err != nil {
 		log.Errorf("player: send failed: %s", err.Error())
