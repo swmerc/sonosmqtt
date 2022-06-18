@@ -217,40 +217,11 @@ func (p *playerImpl) InitWebsocketConnection(headers http.Header, eventHandler P
 }
 
 func (p *playerImpl) CloseWebsocketConnection() {
-	p.Lock()
-
-	// Remove the stuff we manage
-	if p.eventHandler != nil {
-		p.eventHandler = nil
-	}
-
+	p.RLock()
 	if p.websocket != nil {
 		p.websocket.Close()
 	}
-
-	// Stop all of the timers and tell everyone that their command failed due to a websocket bounce
-	callbacks := make([]func(response sonos.WebsocketResponse), 0, len(p.cmdCallbackMap))
-	for _, cmdCallback := range p.cmdCallbackMap {
-		cmdCallback.timer.Stop()
-		callbacks = append(callbacks, cmdCallback.callback)
-	}
-
-	p.Unlock()
-
-	// Call all of the callbacks outside of the lock
-	response := sonos.WebsocketResponse{
-		Headers: sonos.ResponseHeaders{
-			CommonHeaders: sonos.CommonHeaders{},
-			Response:      "The websocket has ceased to be.  It is a former websocket.",
-			Success:       false,
-			Type:          "none",
-		},
-		BodyJSON: []byte{},
-	}
-
-	for _, callback := range callbacks {
-		callback(response)
-	}
+	p.RUnlock()
 }
 
 func handleCmdTimeout(p *playerImpl, cmdId string, timer *time.Timer) {
@@ -389,10 +360,33 @@ func (p *playerImpl) OnError(userData string, err error) {
 
 func (p *playerImpl) OnClose(userData string) {
 	p.Lock()
-	defer p.Unlock()
 
 	p.websocket = nil
 	p.eventHandler = nil
+
+	// Stop all of the timers and tell everyone that their command failed due to a websocket bounce
+	callbacks := make([]func(response sonos.WebsocketResponse), 0, len(p.cmdCallbackMap))
+	for _, cmdCallback := range p.cmdCallbackMap {
+		cmdCallback.timer.Stop()
+		callbacks = append(callbacks, cmdCallback.callback)
+	}
+
+	p.Unlock()
+
+	// Call all of the callbacks outside of the lock
+	response := sonos.WebsocketResponse{
+		Headers: sonos.ResponseHeaders{
+			CommonHeaders: sonos.CommonHeaders{},
+			Response:      "The websocket has ceased to be.  It is a former websocket.",
+			Success:       false,
+			Type:          "none",
+		},
+		BodyJSON: []byte{},
+	}
+
+	for _, callback := range callbacks {
+		callback(response)
+	}
 }
 
 func (p *playerImpl) OnMessage(userData string, msg []byte) {
