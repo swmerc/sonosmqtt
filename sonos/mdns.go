@@ -4,52 +4,52 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	zeroconf "github.com/grandcat/zeroconf"
 	log "github.com/sirupsen/logrus"
 )
 
-// MDNSData is an interface for the data we read from the mDNS responses.
-type MDNSData interface {
+// DiscoveryData is an interface for the data we read from the mDNS responses.  We may eventually support
+// other discovery mechanisms, but mDNS works fine and is the most modern option.
+type DiscoveryData interface {
 	GetHouseholdId() (string, error)
 	GetInfoUrl() (string, error)
 }
 
-// ScanForPlayersViaMDNS does an active scan for Sonos devices over mDNS
-// and returns an array of the ones it finds.
-func ScanForPlayersViaMDNS(scanTimeInSeconds uint) []MDNSData {
-	// Discover all services on the network (e.g. _workstation._tcp)
-	resolver, err := zeroconf.NewResolver(nil)
-	if err != nil {
-		log.Fatalln("mDNS: failed to initialize resolver:", err.Error())
-	}
+// ScanForPlayers does an active scan for Sonos devices over mDNS and sends the data
+// down the responseChannel as it comes in.
+func ScanForPlayers(ctx context.Context, responseChannel chan DiscoveryData) {
 
-	// This is moderately sketch, but should be safe.  The goroutine below writes to
-	// the slice and we don't read it until the browse operation completes.
+	go func() {
 
-	devices := make([]MDNSData, 0, 32)
-	entryChannel := make(chan *zeroconf.ServiceEntry)
-	go func(results <-chan *zeroconf.ServiceEntry, players *[]MDNSData) {
-		for entry := range results {
-			var p mDNSResponse
-			p.loadFromServiceEntry(entry)
-			*players = append(*players, &p)
+		log.Debugf("mDNS: start scan")
+
+		// Discover all services on the network (e.g. _workstation._tcp)
+		resolver, err := zeroconf.NewResolver(nil)
+		if err != nil {
+			log.Fatalln("mDNS: failed to initialize resolver:", err.Error())
 		}
-	}(entryChannel, &devices)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(scanTimeInSeconds))
-	defer cancel()
-	err = resolver.Browse(ctx, "_sonos._tcp", "local.", entryChannel)
-	if err != nil {
-		log.Fatalln("mDNS: failed to browse:", err.Error())
-	}
+		// Grab data on one channel, translate, send it on another.
+		serviceEntryChannel := make(chan *zeroconf.ServiceEntry)
+		go func(serviceEntries <-chan *zeroconf.ServiceEntry) {
+			for entry := range serviceEntries {
+				// NOTE: I hate the context switch, but like the API.  I think I'd have to pass
+				//       in the serviceEntryChannel to avoid it,  but I don't want code outside
+				//       of this module dealing with the Sonos-isms (or mDNS).
+				responseChannel <- mDNSDataFromServiceEntry(entry)
+			}
+		}(serviceEntryChannel)
 
-	<-ctx.Done()
+		// Kick off the actual browse
+		err = resolver.Browse(ctx, "_sonos._tcp", "local.", serviceEntryChannel)
+		if err != nil {
+			log.Errorf("mDNS: failed to browse: %s", err.Error())
+		}
 
-	log.Debugf("mDNS: done scan")
+		log.Debugf("mDNS: done scan")
+	}()
 
-	return devices
 }
 
 // mDNSResponse is our internal data format.
@@ -77,22 +77,23 @@ func (resp *mDNSResponse) GetHouseholdId() (string, error) {
 // Required for the interface
 func (resp *mDNSResponse) GetInfoUrl() (string, error) {
 	if data, ok := resp.records["info"]; ok {
-		return fmt.Sprintf("https://%s:%d%s", resp.IP, resp.Port, data), nil
+		return ConvertToApiVersion1(fmt.Sprintf("https://%s:%d%s", resp.IP, resp.Port, data)), nil
 	}
 	return "", fmt.Errorf("%s", "mDNS: No info found")
 }
 
-// loadFromServiceEntry is a private function that initializes our internal
-// structure from the IP/port and TXT records
-func (resp *mDNSResponse) loadFromServiceEntry(e *zeroconf.ServiceEntry) {
+// mDNSDataFromServiceEntry creates a proper MDNSData struct from the raw mDNS data provided
+// in a service record.
+func mDNSDataFromServiceEntry(e *zeroconf.ServiceEntry) DiscoveryData {
 	// Simple stuff
-	resp.IP = e.AddrIPv4[0].String()
-	resp.Port = e.Port
-
-	log.Debugf("mDNS: %s:%d: %s", resp.IP, resp.Port, strings.Join(e.Text, ","))
+	data := &mDNSResponse{
+		IP:      e.AddrIPv4[0].String(),
+		Port:    e.Port,
+		records: map[string]string{},
+	}
 
 	// Parse the TXT records
-	resp.records = make(map[string]string)
+	data.records = make(map[string]string)
 	for _, value := range e.Text {
 
 		split := strings.Split(value, "=")
@@ -100,6 +101,8 @@ func (resp *mDNSResponse) loadFromServiceEntry(e *zeroconf.ServiceEntry) {
 			continue
 		}
 
-		resp.records[split[0]] = split[1]
+		data.records[split[0]] = split[1]
 	}
+
+	return data
 }

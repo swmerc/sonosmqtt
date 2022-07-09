@@ -97,8 +97,8 @@ func NewInternalPlayerFromInfoResponse(info sonos.PlayerInfoResponse) Player {
 		groupId:        info.GroupId,
 		coordinatorId:  groupIdToCoordinatorId(info.GroupId),
 		householdId:    info.HouseholdId,
-		restUrl:        info.RestUrl,
-		websocketUrl:   info.WebsocketUrl,
+		restUrl:        sonos.ConvertToApiVersion1(info.RestUrl),
+		websocketUrl:   sonos.ConvertToApiVersion1(info.WebsocketUrl),
 		RWMutex:        sync.RWMutex{},
 		websocket:      nil,
 		eventHandler:   nil,
@@ -117,8 +117,8 @@ func NewInternalPlayerFromSonosPlayer(player sonos.Player, householdId string, g
 		groupId:        groupId,
 		coordinatorId:  groupIdToCoordinatorId(groupId),
 		householdId:    householdId,
-		restUrl:        restUrlFromWebsocketUrl(player.WebsocketUrl),
-		websocketUrl:   player.WebsocketUrl,
+		restUrl:        restUrlFromWebsocketUrl(sonos.ConvertToApiVersion1(player.WebsocketUrl)),
+		websocketUrl:   sonos.ConvertToApiVersion1(player.WebsocketUrl),
 		RWMutex:        sync.RWMutex{},
 		websocket:      nil,
 		eventHandler:   nil,
@@ -291,32 +291,6 @@ func (p *playerImpl) SendRequestViaWebsocket(request sonos.WebsocketRequest, cal
 
 	return nil
 }
-
-/*
-func (p *playerImpl) sendResponseViaWebsocket(response sonos.WebsocketResponse) error {
-	p.Lock()
-
-	ws := p.websocket
-	if ws == nil {
-		p.Unlock()
-		return fmt.Errorf("player: %s: attempt to send with no websocket", p.PlayerId)
-	}
-
-	p.Unlock()
-
-	//
-	// Might as well convert to JSON, log, and send outside of the lock
-	//
-	msg, err := response.ToRawBytes()
-	if err != nil {
-		return err
-	}
-
-	log.Infof("player: ws: outgoing: %s", string(msg))
-
-	return ws.SendMessage(msg)
-}
-*/
 
 func (p *playerImpl) SendCommandViaWebsocket(namespace string, command string, callback func(sonos.WebsocketResponse)) error {
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -422,25 +423,25 @@ func (app *App) OnEvent(id string, response sonos.WebsocketResponse) {
 //
 
 func (app *App) discoverPlayer() Player {
-	//
-	// Iterate over the mDNS responses and fill in a list of all players.  It turns out that we only
-	// need a single player in the correct HH to respond, so we may be able to do this as the mDNS
-	// responses come in at some point.
-	//
-	// The loop is a bit funky since we currently can reject players if something goes wrong.  All errors
-	// are continues so we try the next player in the array
-	//
-	mdnsDevices := sonos.ScanForPlayersViaMDNS(app.config.Sonos.ScanTime)
+	var player Player = nil
 
-	for _, mdnsDevice := range mdnsDevices {
-		if info, err := mdnsDevice.GetInfoUrl(); err == nil {
-			log.Infof("app: found device: %s", info)
-		}
-	}
+	// Create a context so we stop getting new mDNS data after ScanTime seconds
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(app.config.Sonos.ScanTime))
+	defer cancel()
 
-	for _, mdnsDevice := range mdnsDevices {
+	// Create a channel to collect responses
+	var responseChannel chan sonos.DiscoveryData = make(chan sonos.DiscoveryData, 32)
 
-		hhid, err := mdnsDevice.GetHouseholdId()
+	// Kick off the discovery process
+	sonos.ScanForPlayers(ctx, responseChannel)
+
+	// Wait for responses to come in.  Note that the discovery code is running on a different goroutine,
+	// so we can block here if we'd like.  At some point I'll kick off multiple REST attempts at a time,
+	// but not today.  This makes discovery nearly instant as it is, and it doesn't beat on the network.
+	for response := range responseChannel {
+
+		// Find the HHID
+		hhid, err := response.GetHouseholdId()
 		if err != nil {
 			log.Errorf("app: GetHouseholdId: %s", err.Error())
 			continue
@@ -455,9 +456,9 @@ func (app *App) discoverPlayer() Player {
 			continue
 		}
 
-		// New player. Hit /info to get the player data, skipping devices with api v2
-		infoUrl, err := mdnsDevice.GetInfoUrl()
-		if err != nil || strings.Contains(infoUrl, "api/v2") {
+		// Hit /info to get the player data,
+		infoUrl, err := response.GetInfoUrl()
+		if err != nil {
 			log.Errorf("app: GetInfoUrl: %s", err.Error())
 			continue
 		}
@@ -470,16 +471,22 @@ func (app *App) discoverPlayer() Player {
 
 		// Parse it and return our happy player so the caller can hit /groups
 		var info sonos.PlayerInfoResponse
-		log.Debugf("PlayerInfo: %s", string(body))
 		if json.Unmarshal(body, &info) != nil {
 			log.Errorf("Unable to parse response from /info")
+			continue
 		}
 
-		return NewInternalPlayerFromInfoResponse(info)
+		// We have a player, stop discovery and get out of here.
+		player = NewInternalPlayerFromInfoResponse(info)
+		cancel()
+		break
 	}
 
-	// Did not find anything at all.  Weeee.
-	return nil
+	// Shut down the context
+	<-ctx.Done()
+
+	// Return what we found, which could be nil.
+	return player
 }
 
 //

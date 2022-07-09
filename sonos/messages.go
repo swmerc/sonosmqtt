@@ -3,7 +3,14 @@ package sonos
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
+
+// ConvertToApiVersion1 replaces v2 in api versions with v1.  At least for now.  I'll eventually have to support v2 when/if
+// Sonos ever ships any changes.
+func ConvertToApiVersion1(url string) string {
+	return strings.Replace(url, "/v2/", "/v1/", 1)
+}
 
 //
 // Support for determing whether a command is for a player instead of a group.  There has to be an easier way to
